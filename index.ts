@@ -59,7 +59,7 @@ import { execFileSync } from "node:child_process";
 import { globSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createBashTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 interface GitHubAppConfig {
 	/** GitHub App client id — used as the JWT `iss` claim. */
@@ -347,7 +347,7 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	// Only override bash when fully configured; otherwise stay inert so agent
 	// commands behave exactly as if the extension were not installed.
 	if (config) {
-		const bashTool = createBashTool(process.cwd(), {
+		const bashTool = createBashToolDefinition(process.cwd(), {
 			spawnHook: ({ command, cwd, env }) => ({
 				command,
 				cwd,
@@ -355,11 +355,7 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 			}),
 		});
 
-		// Overrides the built-in `bash` tool; renderers etc. are inherited.
-		pi.registerTool({
-			...bashTool,
-			execute: (toolCallId, params, signal, onUpdate, ctx) => bashTool.execute(toolCallId, params, signal, onUpdate, ctx),
-		});
+		pi.registerTool(bashTool);
 	}
 
 	pi.registerCommand("pi-github-app-status", {
