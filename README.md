@@ -70,6 +70,8 @@ Real newlines in the PEM work as-is; escaped `\n` sequences are tolerated too.
 
 ### GitHub App prerequisites
 
+New to GitHub Apps? Follow the official guides: [register the App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app), [generate a private key](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps), and [install it](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app) on the target account/org.
+
 - A GitHub App owned by you/your org with a generated private key.
 - The App **installed** on the account/org/repositories you want the agent to reach.
 - Repository permissions for what the agent should do — for typical agent work: **Contents: Read & write** (clone/push), **Pull requests: Read & write**, **Issues: Read & write**, **Metadata: Read-only** (mandatory), plus **Workflows: Read & write** if the agent touches GitHub Actions. No webhook URL is needed.
