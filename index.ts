@@ -344,19 +344,23 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	const countersinks = config ? githubCountersinks() : [];
 	if (config) void refresh(config); // token ready long before the agent's first bash call
 
-	const bashTool = createBashTool(process.cwd(), {
-		spawnHook: ({ command, cwd, env }) => ({
-			command,
-			cwd,
-			env: agentEnv(env, config ? currentToken() : null, countersinks),
-		}),
-	});
+	// Nothing configured at all: stay inert (status command still available).
+	// Partially configured: enforce guard mode so git/gh fail rather than fall back.
+	if (config || error) {
+		const bashTool = createBashTool(process.cwd(), {
+			spawnHook: ({ command, cwd, env }) => ({
+				command,
+				cwd,
+				env: agentEnv(env, config ? currentToken() : null, countersinks),
+			}),
+		});
 
-	// Overrides the built-in `bash` tool; renderers etc. are inherited.
-	pi.registerTool({
-		...bashTool,
-		execute: (toolCallId, params, signal, onUpdate, ctx) => bashTool.execute(toolCallId, params, signal, onUpdate, ctx),
-	});
+		// Overrides the built-in `bash` tool; renderers etc. are inherited.
+		pi.registerTool({
+			...bashTool,
+			execute: (toolCallId, params, signal, onUpdate, ctx) => bashTool.execute(toolCallId, params, signal, onUpdate, ctx),
+		});
+	}
 
 	pi.registerCommand("pi-github-app-status", {
 		description: "Show GitHub App auth state for agent bash (no secrets)",

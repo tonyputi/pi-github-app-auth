@@ -2,7 +2,23 @@
 
 A [Pi](https://pi.dev) extension that authenticates **commands executed by the Pi agent** to GitHub as a **GitHub App installation** — while leaving your personal GitHub credentials completely untouched.
 
-## Why it exists
+Keywords: coding agent GitHub authentication, GitHub App installation token, git push as GitHub App, gh CLI as GitHub App, agent identity separation, least-privilege GitHub access for AI agents.
+
+## The problem
+
+Coding agents like Pi execute `git` and `gh` commands through a shell that inherits everything your personal environment offers: SSH keys in `~/.ssh`, credential helpers (macOS Keychain, `~/.git-credentials`, `gh auth`), and tokens exported by your shell profile or direnv (e.g. `GH_TOKEN`, `GITHUB_TOKEN`). As a result, every GitHub operation an agent performs is attributed to **you**, the human:
+
+- `git push`, `gh pr create`, issue comments, and workflow runs happen under your personal account even when the work belongs to an automation identity.
+- Over SSH, git silently uses your default personal key (`id_ed25519` or whatever `~/.ssh/config` selects), including multi-account alias hosts that map to `github.com`.
+- Personal credential helpers are not only consulted for authentication — after a successful agent authentication they can also **store** the agent's token permanently into `~/.git-credentials` or the keychain.
+- Long-lived personal tokens (`ghp_…`) exported as `GH_TOKEN`/`GITHUB_TOKEN` leak into every subprocess the agent spawns, including build tools that forward the environment.
+- Common workarounds each have real drawbacks: `gh auth login` mutates global gh state; `git config credential.helper` edits are persistent and repository-wide; tokens embedded in remote URLs leak through `git remote -v` and shell history; personal fine-grained PATs are still long-lived secrets.
+
+In short: without deliberate isolation, an AI coding agent shares one GitHub identity with its human, with persistent credential storage in the blast radius.
+
+## The solution
+
+`pi-github-app-auth` gives the Pi agent its own GitHub identity — a **GitHub App installation** — and nothing else:
 
 By default, `git` and `gh` commands run by a coding agent use whatever credentials are ambient in your shell: personal tokens, keychain helpers, SSH keys. That makes it easy to accidentally open a PR, push a branch, or comment as *you* instead of as the machine identity you meant to use — or to let a helper silently persist an agent token into `~/.git-credentials`.
 
@@ -13,6 +29,8 @@ This extension draws a hard line:
 | Pi agent `bash` tool | GitHub App installation (short-lived token) |
 | Your normal terminal | your existing personal credentials |
 | Pi manual shell (`!` / `!!`) | your existing personal environment |
+
+GitHub App installation tokens are short-lived (one hour), scoped to the repositories and permissions granted to the installation, fully revocable, and visible in the GitHub audit log as the App — not as you. That is the principle of least privilege for agent GitHub access.
 
 The extension only provides authentication and isolation. It does not create PRs, manage issues, or wrap `gh` — your normal `git` and `gh` commands simply run as the App when the agent executes them.
 
