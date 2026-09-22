@@ -337,16 +337,16 @@ function agentEnv(env: NodeJS.ProcessEnv, token: string | null, countersinks: Ar
 export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	const { config, error } = readConfig();
 	if (error) {
-		// Partially configured: fail clearly, never fall back silently.
-		console.error(`pi-github-app: ${error} — agent git/gh commands will fail rather than use personal credentials`);
+		// Invalid/incomplete config: stay inert — never break the user's session.
+		console.error(`pi-github-app: ${error} — staying inactive; agent git/gh run with your normal credentials (see /pi-github-app-status)`);
 	}
 	// Computed once at load (regenerated on /reload); the SSH guard covers drift.
 	const countersinks = config ? githubCountersinks() : [];
 	if (config) void refresh(config); // token ready long before the agent's first bash call
 
-	// Nothing configured at all: stay inert (status command still available).
-	// Partially configured: enforce guard mode so git/gh fail rather than fall back.
-	if (config || error) {
+	// Only override bash when fully configured; otherwise stay inert so agent
+	// commands behave exactly as if the extension were not installed.
+	if (config) {
 		const bashTool = createBashTool(process.cwd(), {
 			spawnHook: ({ command, cwd, env }) => ({
 				command,
