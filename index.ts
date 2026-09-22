@@ -380,4 +380,4 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 }
 
 // Exposed for self-check scripts only; pi itself only uses the default export.
-export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, GITHUB_CREDENTIAL_HELPER };
+export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, mintAppJwt, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };
