@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _internals } from "./index.ts";
 
-const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
+const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
 
 // --- readConfig -----------------------------------------------------------
 {
@@ -131,6 +131,17 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, GI
 	assert.equal(offsetEnv[`GIT_CONFIG_KEY_${sinkIdx}`], "url.a.insteadOf", "countersinks appended after host rules");
 	assert.equal(offsetEnv.GIT_CONFIG_COUNT, String(sinkIdx + 1));
 	console.log("ok agentEnv");
+}
+
+// --- parseSubcommand ------------------------------------------------------
+{
+	assert.equal(parseSubcommand(""), "");
+	assert.equal(parseSubcommand("   "), "");
+	assert.equal(parseSubcommand("status"), "status");
+	assert.equal(parseSubcommand("  status  "), "status");
+	assert.equal(parseSubcommand("status extra args"), "status");
+	assert.equal(parseSubcommand("bogus"), "bogus");
+	console.log("ok parseSubcommand");
 }
 
 console.log("\nall tests passed");

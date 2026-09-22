@@ -120,7 +120,7 @@ SSH host aliases that resolve to `github.com` in `~/.ssh/config` (including `Inc
 
 ## Troubleshooting
 
-Run `/pi-github-app-status` inside Pi (no secrets are shown).
+Run `/github-app-auth status` inside Pi (no secrets are shown).
 
 - **`incomplete configuration — missing …`** — one of the three `PI_GITHUB_APP_*` variables is unset or empty. With direnv, `direnv allow` and restart Pi. In this state the extension stays inactive: agent `git`/`gh` commands simply run with your normal credentials — nothing is blocked.
 - **`GitHub rejected the App JWT (HTTP 401)`** — wrong client id, wrong/stale private key, or system clock skew beyond ~1 minute.

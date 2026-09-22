@@ -334,11 +334,16 @@ function agentEnv(env: NodeJS.ProcessEnv, token: string | null, countersinks: Ar
 	return next;
 }
 
+/** First whitespace-separated token of raw command args ("" when blank). */
+function parseSubcommand(args: string): string {
+	return args.trim().split(/\s+/)[0] ?? "";
+}
+
 export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	const { config, error } = readConfig();
 	if (error) {
 		// Invalid/incomplete config: stay inert — never break the user's session.
-		console.error(`pi-github-app: ${error} — staying inactive; agent git/gh run with your normal credentials (see /pi-github-app-status)`);
+		console.error(`pi-github-app: ${error} — staying inactive; agent git/gh run with your normal credentials (see /github-app-auth status)`);
 	}
 	// Computed once at load (regenerated on /reload); the SSH guard covers drift.
 	const countersinks = config ? githubCountersinks() : [];
@@ -358,14 +363,19 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 		pi.registerTool(bashTool);
 	}
 
-	pi.registerCommand("pi-github-app-status", {
-		description: "Show GitHub App auth state for agent bash (no secrets)",
-		handler: async (_args, ctx) => {
+	pi.registerCommand("github-app-auth", {
+		description: "GitHub App auth for agent bash — subcommands: status (no secrets)",
+		handler: async (args, ctx) => {
+			const sub = parseSubcommand(args);
+			if (sub && sub !== "status" && sub !== "help") {
+				ctx.ui.notify(`github-app-auth: unknown subcommand "${sub}" — try /github-app-auth status`, "warning");
+				return;
+			}
 			const token = config ? currentToken() : null;
 			const expiry = cached ? new Date(cached.expiresAtMs).toLocaleTimeString() : "—";
 			ctx.ui.notify(
 				[
-					config ? "pi-github-app: active (agent bash authenticates as the GitHub App)" : `pi-github-app: NOT active — ${error ?? "not configured"}`,
+					config ? "github-app-auth: active (agent bash authenticates as the GitHub App)" : `github-app-auth: NOT active — ${error ?? "not configured"}`,
 					token ? `installation token: cached in memory, expires ${expiry}` : "installation token: not available right now",
 					"agent bash env: GH_TOKEN + ephemeral git config (credential helper, SSH->HTTPS insteadOf + SSH guard); PI_GITHUB_APP_* removed",
 				].join("\n"),
@@ -376,4 +386,4 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 }
 
 // Exposed for self-check scripts only; pi itself only uses the default export.
-export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, mintAppJwt, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };
+export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, mintAppJwt, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };
