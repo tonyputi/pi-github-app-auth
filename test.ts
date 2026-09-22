@@ -13,7 +13,7 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, GI
 
 // --- readConfig -----------------------------------------------------------
 {
-	const keep = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY"].map((k) => [k, process.env[k]]);
+	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY"].map((k) => [k, process.env[k]] as const);
 	for (const [k] of keep) delete process.env[k];
 	assert.deepEqual(readConfig(), {}, "unconfigured -> inert");
 
