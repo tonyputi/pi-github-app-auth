@@ -1,0 +1,374 @@
+#!/usr/bin/env node
+/**
+ * pi-github-app-auth setup — assisted GitHub App creation via App Manifest.
+ *
+ * Turns the manual setup (create App, set permissions, generate key, install,
+ * copy two ids) into: one command + creating the App in the browser + one
+ * install click. Only Node built-ins; no npm dependencies.
+ *
+ * Flow:
+ *   1. Serves a one-shot callback on 127.0.0.1 (ephemeral port) and opens an
+ *      auto-submitting manifest form (temp file, no secrets in it) that
+ *      pre-fills name aside, permissions and webhook-off.
+ *   2. You pick a (globally unique) App name and press Create in the browser.
+ *      GitHub redirects to the local callback with a single-use `code`.
+ *   3. The code is exchanged via POST /app-manifests/{code}/conversions for
+ *      the App id/slug, client_id and PEM private key.
+ *   4. Opens the App install page; polls GET /app/installations with a fresh
+ *      in-memory JWT until the installation appears (or you pick one).
+ *   5. Prints an `.envrc` block (or appends it with `--envrc <path>`).
+ *
+ * If PI_GITHUB_APP_CLIENT_ID and PI_GITHUB_APP_PRIVATE_KEY are already set
+ * (e.g. you only lost the installation id), creation is skipped and the
+ * command goes straight to step 4.
+ *
+ * Secrets discipline: the PEM and JWTs live in memory only and are never
+ * logged. The PEM is emitted exactly once — into your terminal (or your
+ * chosen file) so you can store it — and never into temp files or errors.
+ */
+
+import crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline/promises";
+import { pathToFileURL } from "node:url";
+
+const GITHUB_API = "https://api.github.com";
+const REPO_URL = "https://github.com/tonyputi/pi-github-app-auth";
+const CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
+const INSTALL_POLL_MS = 5 * 1000;
+const INSTALL_TIMEOUT_MS = 3 * 60 * 1000;
+
+interface SetupArgs {
+	org?: string;
+	envrcPath?: string;
+	help?: boolean;
+}
+
+interface ManifestInput {
+	/** Where the auto-submitting form POSTs. */
+	action: string;
+	/** Manifest payload (no secrets). */
+	manifest: Record<string, unknown>;
+}
+
+interface InstallationRef {
+	id: number;
+	login: string;
+}
+
+/** Parse `code` out of a callback request target (null when absent). */
+function callbackCode(target: string | undefined): string | null {
+	if (!target) return null;
+	const q = target.indexOf("?");
+	if (q === -1) return null;
+	const code = new URLSearchParams(target.slice(q + 1)).get("code")?.trim();
+	return code ? code : null;
+}
+
+/** Decide how to resolve the installation id from what the API lists. */
+function selectInstallation(
+	installations: InstallationRef[],
+): { kind: "none" } | { kind: "single"; id: number } | { kind: "choose"; options: InstallationRef[] } {
+	if (installations.length === 0) return { kind: "none" };
+	if (installations.length === 1) return { kind: "single", id: installations[0].id };
+	return { kind: "choose", options: installations };
+}
+
+/** Tolerate PEM keys whose newlines were escaped as literal "\n". */
+function normalizePem(key: string): string {
+	return key.includes("\\n") && !key.includes("\n") ? key.replace(/\\n/g, "\n") : key;
+}
+
+/** Sign a short-lived GitHub App JWT (RS256) in memory. Throws on a bad key. */
+function mintJwt(clientId: string, privateKey: string): string {
+	const now = Math.floor(Date.now() / 1000);
+	const b64url = (obj: object): string => Buffer.from(JSON.stringify(obj)).toString("base64url");
+	const signingInput = `${b64url({ alg: "RS256", typ: "JWT" })}.${b64url({
+		iss: clientId,
+		iat: now - 30,
+		exp: now + 540,
+	})}`;
+	return `${signingInput}.${crypto.createSign("RSA-SHA256").update(signingInput).sign(privateKey, "base64url")}`;
+}
+
+/** Manifest creation endpoint + pre-filled payload for the agent's needs. */
+function manifestInput(port: number, org?: string): ManifestInput {
+	const action = org
+		? `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new`
+		: "https://github.com/settings/apps/new";
+	return {
+		action,
+		manifest: {
+			url: REPO_URL,
+			redirect_url: `http://127.0.0.1:${port}/callback`,
+			hook_attributes: { active: false },
+			public: false,
+			description: "Authenticates Pi agent bash commands to GitHub as an App installation.",
+			default_permissions: {
+				contents: "write",
+				issues: "write",
+				pull_requests: "write",
+				workflows: "write",
+				metadata: "read",
+			},
+			default_events: [],
+		},
+	};
+}
+
+/** Auto-submitting form page (written to a temp file and opened). No secrets. */
+function manifestFormHtml(action: string, manifest: Record<string, unknown>): string {
+	const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+	return `<!doctype html><html><body><form id="f" method="post" action="${esc(action)}"><input type="hidden" name="manifest" value="${esc(JSON.stringify(manifest))}"></form><script>document.getElementById("f").submit()</script></body></html>`;
+}
+
+/** `.envrc` block for direnv (placeholder-free, ready to store). */
+function formatEnvrc(clientId: string, installationId: string, privateKey: string): string {
+	return [
+		`export PI_GITHUB_APP_CLIENT_ID="${clientId}"`,
+		`export PI_GITHUB_APP_INSTALLATION_ID="${installationId}"`,
+		`export PI_GITHUB_APP_PRIVATE_KEY="${privateKey}"`,
+	].join("\n");
+}
+
+const USAGE = `pi-github-app-auth setup — create the GitHub App via manifest, install it, emit .envrc
+
+Usage: pi-github-app-auth-setup [--org <name>] [--envrc <path>]
+
+  --org <name>    create the App under an organization instead of your account
+  --envrc <path>  append the export block to <path> instead of only printing it
+  -h, --help      this text
+
+With PI_GITHUB_APP_CLIENT_ID + PI_GITHUB_APP_PRIVATE_KEY already set, App
+creation is skipped and only the installation id is resolved.`;
+
+function parseArgs(argv: string[]): SetupArgs {
+	const args: SetupArgs = {};
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i];
+		if (a === "--org") {
+			const v = argv[++i];
+			if (!v) throw new Error("missing value for --org\n\n" + USAGE);
+			args.org = v;
+		} else if (a === "--envrc") {
+			const v = argv[++i];
+			if (!v) throw new Error("missing value for --envrc\n\n" + USAGE);
+			args.envrcPath = v;
+		} else if (a === "-h" || a === "--help") {
+			args.help = true;
+		} else {
+			throw new Error(`unknown argument "${a}"\n\n${USAGE}`);
+		}
+	}
+	return args;
+}
+
+function openBrowser(target: string): void {
+	const [cmd, cmdArgs] =
+		process.platform === "darwin"
+			? ["open", [target]]
+			: process.platform === "win32"
+				? ["cmd", ["/c", "start", "", target]]
+				: ["xdg-open", [target]];
+	execFile(cmd, cmdArgs, (err) => {
+		if (err) console.log(`Open this URL manually:\n${target}`);
+	});
+}
+
+function prompt(question: string): Promise<string> {
+	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	return rl.question(question).finally(() => rl.close());
+}
+
+/** One-shot 127.0.0.1 server resolving with the manifest `code`. */
+function waitForCode(): Promise<{ server: Server; port: number; code: Promise<string> }> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const server = createServer((req, res) => {
+			const code = callbackCode(req.url);
+			if (!code || settled) {
+				res.writeHead(404, { "content-type": "text/plain" }).end("not found");
+				return;
+			}
+			settled = true;
+			clearTimeout(timer);
+			res.writeHead(200, { "content-type": "text/html" }).end("<h1>App created — back to the terminal.</h1>");
+			resolveCode(code);
+		});
+		let resolveCode!: (code: string) => void;
+		const code = new Promise<string>((res) => {
+			resolveCode = res;
+		});
+		const timer = setTimeout(() => {
+			if (!settled) {
+				settled = true;
+				server.close();
+				reject(new Error("timed out waiting for the GitHub redirect (5 min) — re-run and complete the form faster"));
+			}
+		}, CALLBACK_TIMEOUT_MS);
+		timer.unref();
+		server.on("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			const port = (server.address() as { port: number }).port;
+			resolve({ server, port, code });
+		});
+	});
+}
+
+interface Conversion {
+	slug: string;
+	clientId: string;
+	pem: string;
+}
+
+async function exchangeCode(code: string): Promise<Conversion> {
+	const res = await fetch(`${GITHUB_API}/app-manifests/${encodeURIComponent(code)}/conversions`, {
+		method: "POST",
+		headers: { Accept: "application/vnd.github+json", "User-Agent": "pi-github-app-auth-setup" },
+	});
+	if (!res.ok) throw new Error("GitHub rejected the manifest code (expired or already used) — re-run the setup");
+	const data = (await res.json()) as { id?: unknown; slug?: unknown; client_id?: unknown; pem?: unknown };
+	if (typeof data.slug !== "string" || typeof data.client_id !== "string" || typeof data.pem !== "string") {
+		throw new Error("unexpected GitHub response to the manifest conversion — re-run the setup");
+	}
+	return { slug: data.slug, clientId: data.client_id, pem: normalizePem(data.pem) };
+}
+
+async function listInstallations(clientId: string, privateKey: string): Promise<InstallationRef[]> {
+	const res = await fetch(`${GITHUB_API}/app/installations`, {
+		headers: {
+			Authorization: `Bearer ${mintJwt(clientId, privateKey)}`,
+			Accept: "application/vnd.github+json",
+			"X-GitHub-Api-Version": "2022-11-28",
+			"User-Agent": "pi-github-app-auth-setup",
+		},
+	});
+	if (!res.ok) throw new Error(`could not list App installations (HTTP ${res.status}) — is the key right?`);
+	const data = (await res.json()) as Array<{ id?: unknown; account?: { login?: unknown } }>;
+	return data.flatMap((i) =>
+		typeof i.id === "number" && typeof i.account?.login === "string" ? [{ id: i.id, login: i.account.login }] : [],
+	);
+}
+
+async function resolveInstallationId(clientId: string, privateKey: string, slug: string): Promise<string> {
+	console.log(`\nInstall the App, then it is detected automatically:\nhttps://github.com/apps/${slug}/installations/new`);
+	openBrowser(`https://github.com/apps/${slug}/installations/new`);
+	const deadline = Date.now() + INSTALL_TIMEOUT_MS;
+	for (;;) {
+		const found = await listInstallations(clientId, privateKey).catch(() => [] as InstallationRef[]);
+		const sel = selectInstallation(found);
+		if (sel.kind === "single") return String(sel.id);
+		if (sel.kind === "choose") {
+			console.log("\nSeveral installations found:");
+			for (const [i, o] of sel.options.entries()) console.log(`  ${i + 1}. ${o.login} (id ${o.id})`);
+			const pick = await prompt("Pick one [1]: ");
+			const n = pick.trim() === "" ? 1 : Number.parseInt(pick.trim(), 10);
+			const chosen = sel.options[n - 1];
+			if (!chosen) throw new Error("invalid choice — re-run and pick a listed number");
+			return String(chosen.id);
+		}
+		if (Date.now() >= deadline) throw new Error("no installation appeared within 3 minutes — install the App, then re-run");
+		console.log("Waiting for the installation… (complete it in the browser)");
+		await new Promise((r) => setTimeout(r, INSTALL_POLL_MS));
+	}
+}
+
+async function main(argv: string[]): Promise<void> {
+	const args = parseArgs(argv);
+	if (args.help) {
+		console.log(USAGE);
+		return;
+	}
+	const fromEnv =
+		process.env.PI_GITHUB_APP_CLIENT_ID?.trim() && process.env.PI_GITHUB_APP_PRIVATE_KEY?.trim()
+		? {
+				clientId: process.env.PI_GITHUB_APP_CLIENT_ID!.trim(),
+				privateKey: normalizePem(process.env.PI_GITHUB_APP_PRIVATE_KEY!.trim()),
+			}
+		: null;
+
+	let clientId: string;
+	let privateKey: string;
+	if (fromEnv) {
+		console.log("App credentials found in the environment — skipping creation.");
+		({ clientId, privateKey } = fromEnv);
+	} else {
+		const { server, port, code: codePromise } = await waitForCode();
+		let conversion: Conversion;
+		try {
+			const { action, manifest } = manifestInput(port, args.org);
+			const formPath = join(tmpdir(), `pi-github-app-manifest-${port}.html`);
+			writeFileSync(formPath, manifestFormHtml(action, manifest), { mode: 0o600 });
+			console.log("Opening the GitHub App form (pre-filled) — pick a unique name and press Create.");
+			openBrowser(formPath);
+			conversion = await exchangeCode(await codePromise);
+			console.log("App created.");
+		} finally {
+			server.close();
+		}
+		clientId = conversion!.clientId;
+		privateKey = conversion!.pem;
+		const installationId = await resolveInstallationId(clientId, privateKey, conversion!.slug);
+		emit(clientId, installationId, privateKey, args.envrcPath);
+		return;
+	}
+	// Existing-App path: installation id is the only missing piece.
+	const found = await listInstallations(clientId, privateKey);
+	const sel = selectInstallation(found);
+	if (sel.kind === "none") throw new Error("the App has no installations — install it on an account first, then re-run");
+	if (sel.kind === "single") {
+		emit(clientId, String(sel.id), privateKey, args.envrcPath);
+		return;
+	}
+	console.log("Several installations found:");
+	for (const [i, o] of sel.options.entries()) console.log(`  ${i + 1}. ${o.login} (id ${o.id})`);
+	const pick = await prompt("Pick one [1]: ");
+	const n = pick.trim() === "" ? 1 : Number.parseInt(pick.trim(), 10);
+	const chosen = sel.options[n - 1];
+	if (!chosen) throw new Error("invalid choice — re-run and pick a listed number");
+	emit(clientId, String(chosen.id), privateKey, args.envrcPath);
+}
+
+function emit(clientId: string, installationId: string, privateKey: string, envrcPath?: string): void {
+	const block = formatEnvrc(clientId, installationId, privateKey);
+	if (envrcPath) {
+		appendFileSync(envrcPath, (needsLeadingNewline(envrcPath) ? "\n" : "") + block + "\n", { mode: 0o600 });
+		console.log(`\nAppended to ${envrcPath}. Reload direnv, restart Pi, then run /github-app-auth status.`);
+	} else {
+		console.log(`\nStore this block (e.g. in .envrc via direnv):\n\n${block}\n\nThen reload direnv, restart Pi, and run /github-app-auth status.`);
+	}
+}
+
+function needsLeadingNewline(path: string): boolean {
+	// Appending blindly is fine — direnv tolerates a blank line; a missing
+	// newline would glue our first export onto the previous line.
+	try {
+		const tail = readFileSync(path, "utf8").slice(-1);
+		return tail !== "" && tail !== "\n";
+	} catch {
+		return false;
+	}
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+	await main(process.argv.slice(2)).catch((err: unknown) => {
+		console.error(`pi-github-app-auth setup: ${err instanceof Error ? err.message : String(err)}`);
+		process.exit(1);
+	});
+}
+
+// Exposed for self-check scripts only.
+export const _setupInternals = {
+	parseArgs,
+	callbackCode,
+	selectInstallation,
+	normalizePem,
+	manifestInput,
+	manifestFormHtml,
+	formatEnvrc,
+	USAGE,
+};

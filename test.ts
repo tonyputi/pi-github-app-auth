@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _internals } from "./index.ts";
+import { _setupInternals } from "./setup.ts";
 
 const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
 
@@ -142,6 +143,47 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, pa
 	assert.equal(parseSubcommand("status extra args"), "status");
 	assert.equal(parseSubcommand("bogus"), "bogus");
 	console.log("ok parseSubcommand");
+}
+
+// --- setup (pure parts; browser/API flow is manual) ------------------------
+{
+	const { parseArgs, callbackCode, selectInstallation, normalizePem, manifestInput, manifestFormHtml, formatEnvrc } = _setupInternals;
+
+	assert.deepEqual(parseArgs([]), {});
+	assert.deepEqual(parseArgs(["--org", "acme", "--envrc", "/tmp/x"]), { org: "acme", envrcPath: "/tmp/x" });
+	assert.deepEqual(parseArgs(["--help"]), { help: true });
+	assert.throws(() => parseArgs(["--bogus"]), /unknown argument/);
+	assert.throws(() => parseArgs(["--org"]), /missing value/);
+
+	assert.equal(callbackCode("/callback?code=abc123"), "abc123");
+	assert.equal(callbackCode("/callback?code=abc123&state=x"), "abc123");
+	assert.equal(callbackCode("/callback"), null);
+	assert.equal(callbackCode("/favicon.ico"), null);
+	assert.equal(callbackCode(undefined), null);
+
+	assert.deepEqual(selectInstallation([]), { kind: "none" });
+	assert.deepEqual(selectInstallation([{ id: 1, login: "a" }]), { kind: "single", id: 1 });
+	assert.equal(selectInstallation([{ id: 1, login: "a" }, { id: 2, login: "b" }]).kind, "choose");
+
+	assert.ok(normalizePem("A\\nB").includes("\n"), "escaped newlines restored");
+	assert.ok(normalizePem("A\nB").includes("\n"), "real newlines kept");
+
+	const { action, manifest } = manifestInput(8471);
+	assert.equal(action, "https://github.com/settings/apps/new");
+	assert.deepEqual(manifestInput(8471, "acme").action, "https://github.com/organizations/acme/settings/apps/new");
+	const perms = manifest.default_permissions as Record<string, string>;
+	assert.equal(perms.contents, "write");
+	assert.equal(perms.metadata, "read");
+	assert.equal((manifest as { redirect_url: string }).redirect_url, "http://127.0.0.1:8471/callback");
+
+	const html = manifestFormHtml(action, manifest);
+	assert.ok(html.includes('method="post"') && html.includes('.submit()'), "auto-submitting form posts the manifest");
+	assert.ok(html.includes(action), "form targets the creation endpoint");
+	assert.ok(!html.includes("</script><script"), "no injection point in embedded JSON");
+
+	const block = formatEnvrc("ID", "42", "PEM");
+	assert.ok(block.includes('PI_GITHUB_APP_CLIENT_ID="ID"') && block.includes('PI_GITHUB_APP_INSTALLATION_ID="42"'), "envrc block names");
+	console.log("ok setup");
 }
 
 console.log("\nall tests passed");

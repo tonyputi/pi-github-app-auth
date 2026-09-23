@@ -54,6 +54,18 @@ pi install /absolute/path/to/pi-github-app-auth
 
 Requires no npm dependencies — only Node built-ins (`crypto`, `fetch`) and the Pi extension API.
 
+## Assisted setup
+
+Instead of clicking through GitHub settings by hand, one command creates the App (permissions pre-filled), installs it, and emits the `.envrc` block:
+
+```bash
+npx pi-github-app-auth-setup
+```
+
+What happens: a pre-filled App form opens in your browser (pick a unique name, press Create) → the App is created from a manifest, so client id and private key come back automatically → the install page opens → the command detects the installation and prints the three `export` lines. Flags: `--org <name>` for an organization-owned App, `--envrc <path>` to append the block to a file instead of printing it. With `PI_GITHUB_APP_CLIENT_ID` + `PI_GITHUB_APP_PRIVATE_KEY` already set, creation is skipped and only the installation id is resolved.
+
+Prefer the manual route? Follow GitHub's App guides, then continue below.
+
 ## Configuration
 
 Three environment variables (typically via direnv):

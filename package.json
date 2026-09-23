@@ -22,8 +22,12 @@
 			"./index.ts"
 		]
 	},
+	"bin": {
+		"pi-github-app-auth-setup": "./setup.ts"
+	},
 	"files": [
 		"index.ts",
+		"setup.ts",
 		"README.md",
 		"LICENSE"
 	],
