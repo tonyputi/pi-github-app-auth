@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # tags, releases, CHANGELOG push-back
+  issues: write # release comments on PRs
+  pull-requests: write # release comments on PRs
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags for semantic-release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
