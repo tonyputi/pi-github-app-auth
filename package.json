@@ -22,6 +22,11 @@
 			"./index.ts"
 		]
 	},
+	"files": [
+		"index.ts",
+		"README.md",
+		"LICENSE"
+	],
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*"
 	},
