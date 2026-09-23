@@ -52,7 +52,7 @@ or from a local checkout:
 pi install /absolute/path/to/pi-github-app-auth
 ```
 
-Requires no npm dependencies — only Node built-ins (`crypto`, `fetch`) and the Pi extension API.
+One runtime dependency — `@octokit/auth-app` (GitHub-maintained) for App JWTs and installation tokens. Everything else is Node built-ins and the Pi extension API.
 
 ## Assisted setup
 
@@ -111,10 +111,9 @@ The extension overrides Pi's built-in `bash` tool and adjusts the environment of
 
 ## Token lifecycle
 
-1. A GitHub App JWT is signed **in memory** with RS256 (`iss` = client id, 9-minute expiry).
-2. It is exchanged for an installation token via `POST /app/installations/{id}/access_tokens`.
-3. The token is cached **in memory only** — never written to disk, logs, or error messages.
-4. A background timer refreshes it **5 minutes before** GitHub's `expires_at` (retrying every 30 s on failure).
+1. A GitHub App JWT is signed **in memory** by `@octokit/auth-app` (`iss` = client id).
+2. It is exchanged for an installation token, cached **in memory only** by the library — never written to disk, logs, or error messages.
+3. A background timer refreshes it **5 minutes before** GitHub's `expires_at` (retrying every 30 s on failure).
 
 If the token is momentarily unavailable, `GH_TOKEN` is given a sentinel value and git/gh fail with a clear error instead of silently using your personal credentials.
 

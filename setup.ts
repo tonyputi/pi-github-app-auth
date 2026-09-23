@@ -4,12 +4,13 @@
  *
  * Turns the manual setup (create App, set permissions, generate key, install,
  * copy two ids) into: one command + creating the App in the browser + one
- * install click. Only Node built-ins; no npm dependencies.
+ * install click. App authentication via @octokit/auth-app (GitHub-maintained);
+ * everything else is Node built-ins.
  *
  * Flow:
- *   1. Serves a one-shot callback on 127.0.0.1 (ephemeral port) and opens an
- *      auto-submitting manifest form (temp file, no secrets in it) that
- *      pre-fills name aside, permissions and webhook-off.
+ *   1. Serves the auto-submitting manifest form on 127.0.0.1 (ephemeral port,
+ *      no secrets in it) that pre-fills everything but the name, plus a
+ *      one-shot callback that captures the single-use manifest `code`.
  *   2. You pick a (globally unique) App name and press Create in the browser.
  *      GitHub redirects to the local callback with a single-use `code`.
  *   3. The code is exchanged via POST /app-manifests/{code}/conversions for
@@ -24,13 +25,13 @@
  *
  * Secrets discipline: the PEM and JWTs live in memory only and are never
  * logged. The PEM is emitted exactly once — into your terminal (or your
- * chosen file) so you can store it — and never into temp files or errors.
+ * chosen file) so you can store it — and never into logs or errors.
  */
 
-import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createAppAuth } from "@octokit/auth-app";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 
@@ -81,16 +82,11 @@ function normalizePem(key: string): string {
 	return key.includes("\\n") && !key.includes("\n") ? key.replace(/\\n/g, "\n") : key;
 }
 
-/** Sign a short-lived GitHub App JWT (RS256) in memory. Throws on a bad key. */
-function mintJwt(clientId: string, privateKey: string): string {
-	const now = Math.floor(Date.now() / 1000);
-	const b64url = (obj: object): string => Buffer.from(JSON.stringify(obj)).toString("base64url");
-	const signingInput = `${b64url({ alg: "RS256", typ: "JWT" })}.${b64url({
-		iss: clientId,
-		iat: now - 30,
-		exp: now + 540,
-	})}`;
-	return `${signingInput}.${crypto.createSign("RSA-SHA256").update(signingInput).sign(privateKey, "base64url")}`;
+type AppAuth = ReturnType<typeof createAppAuth>;
+
+/** App auth instance (JWT `iss` = client id — accepted by GitHub, see index.ts). */
+function createAuth(clientId: string, privateKey: string): AppAuth {
+	return createAppAuth({ appId: clientId, privateKey });
 }
 
 /** Manifest creation endpoint + pre-filled payload for the agent's needs. */
@@ -266,10 +262,11 @@ async function exchangeCode(code: string, apiBase: string = GITHUB_API): Promise
 	return { slug: data.slug, clientId: data.client_id, pem: normalizePem(data.pem) };
 }
 
-async function listInstallations(clientId: string, privateKey: string, apiBase: string = GITHUB_API): Promise<InstallationRef[]> {
+async function listInstallations(auth: AppAuth, apiBase: string = GITHUB_API): Promise<InstallationRef[]> {
+	const { token } = (await auth({ type: "app" })) as { token: string };
 	const res = await fetch(`${apiBase}/app/installations`, {
 		headers: {
-			Authorization: `Bearer ${mintJwt(clientId, privateKey)}`,
+			Authorization: `Bearer ${token}`,
 			Accept: "application/vnd.github+json",
 			"X-GitHub-Api-Version": "2022-11-28",
 			"User-Agent": "pi-github-app-auth-setup",
@@ -291,8 +288,9 @@ async function resolveInstallationId(
 	console.log(`\nInstall the App, then it is detected automatically:\nhttps://github.com/apps/${slug}/installations/new`);
 	openBrowser(`https://github.com/apps/${slug}/installations/new`);
 	const deadline = Date.now() + INSTALL_TIMEOUT_MS;
+	const auth = createAuth(clientId, privateKey);
 	for (;;) {
-		const found = await listInstallations(clientId, privateKey, apiBase).catch(() => [] as InstallationRef[]);
+		const found = await listInstallations(auth, apiBase).catch(() => [] as InstallationRef[]);
 		const sel = selectInstallation(found);
 		if (sel.kind === "single") return String(sel.id);
 		if (sel.kind === "choose") {
@@ -354,7 +352,8 @@ async function main(argv: string[]): Promise<void> {
 		return;
 	}
 	// Existing-App path: installation id is the only missing piece.
-	const found = await listInstallations(clientId, privateKey);
+	const auth = createAuth(clientId, privateKey);
+	const found = await listInstallations(auth);
 	const sel = selectInstallation(found);
 	if (sel.kind === "none") throw new Error("the App has no installations — install it on an account first, then re-run");
 	if (sel.kind === "single") {
@@ -407,6 +406,7 @@ export const _setupInternals = {
 	manifestInput,
 	manifestFormHtml,
 	formatEnvrc,
+	createAuth,
 	createSetupServer,
 	exchangeCode,
 	listInstallations,

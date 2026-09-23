@@ -3,14 +3,14 @@
  * network: run with `npm test` (Node 22.18+ strips types natively).
  */
 import assert from "node:assert";
-import { generateKeyPairSync, createVerify } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _internals } from "./index.ts";
 import { _setupInternals } from "./setup.ts";
 
-const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
+const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
 
 // --- readConfig -----------------------------------------------------------
 {
@@ -35,17 +35,16 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, pa
 	console.log("ok readConfig");
 }
 
-// --- mintAppJwt -----------------------------------------------------------
+// --- app auth (library-owned JWT; only wiring is ours) -----------------------
 {
-	const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
-	const jwt = mintAppJwt({ clientId: "Iv1abc", installationId: "1", privateKey });
-	const [h, p, s] = jwt.split(".");
+	const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+	const auth = createAuth("Iv1abc", privateKey);
+	const { token } = (await auth({ type: "app" })) as { token: string };
+	const [h, p] = token.split(".");
 	assert.equal(JSON.parse(Buffer.from(h, "base64url").toString()).alg, "RS256");
-	const claims = JSON.parse(Buffer.from(p, "base64url").toString());
-	assert.equal(claims.iss, "Iv1abc");
-	assert.ok(claims.exp - claims.iat === 570, "9 min lifetime + 30s skew");
-	assert.ok(createVerify("RSA-SHA256").update(`${h}.${p}`).verify(publicKey, s, "base64url"), "signature verifies with the App public key");
-	console.log("ok mintAppJwt");
+	assert.equal(JSON.parse(Buffer.from(p, "base64url").toString()).iss, "Iv1abc");
+	assert.equal(typeof fetchInstallationToken, "function", "installation exchange stays awaitable for the background loop");
+	console.log("ok appAuth");
 }
 
 // --- githubSshHosts -------------------------------------------------------
@@ -188,7 +187,7 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, pa
 
 // --- setup server + API parts (localhost only, no external network) --------
 {
-	const { createSetupServer, exchangeCode, listInstallations } = _setupInternals;
+	const { createAuth, createSetupServer, exchangeCode, listInstallations } = _setupInternals;
 
 	// form serving + code capture
 	const setup = createSetupServer();
@@ -224,7 +223,7 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, pa
 	assert.equal(conv.slug, "my-app");
 	assert.equal(conv.clientId, "Iv1x");
 	assert.ok(conv.pem.includes("PRIVATE KEY"));
-	assert.deepEqual(await listInstallations("Iv1x", privateKey, apiBase), [{ id: 7, login: "octo" }]);
+	assert.deepEqual(await listInstallations(createAuth("Iv1x", privateKey), apiBase), [{ id: 7, login: "octo" }]);
 	api.close();
 	console.log("ok setup api");
 }
