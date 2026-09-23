@@ -1,3 +1,10 @@
+# [0.2.0](https://github.com/tonyputi/pi-github-app-auth/compare/v0.1.1...v0.2.0) (2026-09-23)
+
+
+### Features
+
+* **setup:** assisted GitHub App creation via manifest ([#14](https://github.com/tonyputi/pi-github-app-auth/issues/14)) ([0ef52eb](https://github.com/tonyputi/pi-github-app-auth/commit/0ef52eb6cd7d1fdaea6997f95f8dae92c03476ad))
+
 ## [0.1.1](https://github.com/tonyputi/pi-github-app-auth/compare/v0.1.0...v0.1.1) (2026-09-23)
 
 
