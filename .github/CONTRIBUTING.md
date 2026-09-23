@@ -17,6 +17,7 @@ No build step: the extension ships as a single `index.ts` (type-stripped by Node
 - Pure logic (`ssh config` parsing, `insteadOf` countersinks, env assembly) gets tests in `test.ts`.
 - `npm test` must pass; update the README if user-visible behavior changes.
 - Never add runtime npm dependencies — Node built-ins and the Pi extension API only.
+- Use [Conventional Commits](https://www.conventionalcommits.org/) in PR titles (the release workflow squash-merges them): `fix:` patches, `feat:` bumps minor, `feat!:`/`BREAKING CHANGE:` bumps major. `docs:`, `chore:`, `test:` and friends release nothing.
 
 ## Security issues
 
