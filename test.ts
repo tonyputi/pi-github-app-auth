@@ -146,7 +146,7 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 // --- setup (pure parts; browser/API flow is manual) ------------------------
 {
-	const { parseArgs, callbackCode, selectInstallation, normalizePem, manifestInput, manifestFormHtml, formatEnvrc } = _setupInternals;
+	const { parseArgs, callbackCode, selectInstallation, normalizePem, manifestInput, manifestFormHtml, formatEnvrc, checkNodeVersion } = _setupInternals;
 
 	assert.deepEqual(parseArgs([]), {});
 	assert.deepEqual(parseArgs(["--org", "acme", "--envrc", "/tmp/x"]), { org: "acme", envrcPath: "/tmp/x" });
@@ -182,6 +182,11 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 	const block = formatEnvrc("ID", "42", "PEM");
 	assert.ok(block.includes('PI_GITHUB_APP_CLIENT_ID="ID"') && block.includes('PI_GITHUB_APP_INSTALLATION_ID="42"'), "envrc block names");
+
+	checkNodeVersion(process.versions.node); // our own runtime passes
+	assert.throws(() => checkNodeVersion("20.11.0"), /too old/);
+	assert.throws(() => checkNodeVersion("22.17.9"), /too old/);
+	assert.throws(() => checkNodeVersion("garbage"), /too old/);
 	console.log("ok setup");
 }
 
