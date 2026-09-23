@@ -186,4 +186,47 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, pa
 	console.log("ok setup");
 }
 
+// --- setup server + API parts (localhost only, no external network) --------
+{
+	const { createSetupServer, exchangeCode, listInstallations } = _setupInternals;
+
+	// form serving + code capture
+	const setup = createSetupServer();
+	await new Promise<void>((res, rej) => {
+		setup.server.once("error", rej);
+		setup.server.listen(0, "127.0.0.1", () => res());
+	});
+	const port = (setup.server.address() as { port: number }).port;
+	const base = `http://127.0.0.1:${port}`;
+	setup.setFormHtml("<form>hello</form>");
+	assert.equal(await (await fetch(`${base}/`)).text(), "<form>hello</form>");
+	assert.equal((await fetch(`${base}/nope`)).status, 404);
+	const codePromise = setup.waitForCode();
+	assert.equal((await fetch(`${base}/callback?code=abc123`)).status, 200);
+	assert.equal(await codePromise, "abc123");
+	setup.server.close();
+	console.log("ok setup server");
+
+	// manifest conversion + installation listing against a mock API
+	const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+	const { createServer } = await import("node:http");
+	const api = createServer((req, res) => {
+		res.writeHead(200, { "content-type": "application/json" });
+		if (req.method === "POST") res.end(JSON.stringify({ slug: "my-app", client_id: "Iv1x", pem: privateKey }));
+		else res.end(JSON.stringify([{ id: 7, account: { login: "octo" } }]));
+	});
+	await new Promise<void>((res, rej) => {
+		api.once("error", rej);
+		api.listen(0, "127.0.0.1", () => res());
+	});
+	const apiBase = `http://127.0.0.1:${(api.address() as { port: number }).port}`;
+	const conv = await exchangeCode("single-use", apiBase);
+	assert.equal(conv.slug, "my-app");
+	assert.equal(conv.clientId, "Iv1x");
+	assert.ok(conv.pem.includes("PRIVATE KEY"));
+	assert.deepEqual(await listInstallations("Iv1x", privateKey, apiBase), [{ id: 7, login: "octo" }]);
+	api.close();
+	console.log("ok setup api");
+}
+
 console.log("\nall tests passed");

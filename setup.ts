@@ -29,10 +29,8 @@
 
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { appendFileSync, readFileSync } from "node:fs";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 
@@ -184,39 +182,69 @@ function prompt(question: string): Promise<string> {
 	return rl.question(question).finally(() => rl.close());
 }
 
-/** One-shot 127.0.0.1 server resolving with the manifest `code`. */
-function waitForCode(): Promise<{ server: Server; port: number; code: Promise<string> }> {
-	return new Promise((resolve, reject) => {
-		let settled = false;
-		const server = createServer((req, res) => {
-			const code = callbackCode(req.url);
-			if (!code || settled) {
-				res.writeHead(404, { "content-type": "text/plain" }).end("not found");
+/**
+ * Local setup server: serves the auto-submitting manifest form at `/` and
+ * captures the single-use manifest `code` at `/callback`.
+ *
+ * No `state` check on the callback: the only abuse is tricking your own
+ * browser into linking someone else's fresh App to your environment — the
+ * attacker gains nothing (it is their App) and the wrong slug is visible
+ * immediately. Same trade-off as Probot's setup flow.
+ */
+function createSetupServer(): {
+	server: Server;
+	setFormHtml: (html: string) => void;
+	waitForCode: () => Promise<string>;
+} {
+	let form = "<h1>Loading GitHub App form…</h1>";
+	let settled = false;
+	let resolveCode!: (code: string) => void;
+	let rejectCode!: (err: Error) => void;
+	const code = new Promise<string>((res, rej) => {
+		resolveCode = res;
+		rejectCode = rej;
+	});
+	// Swallow the "no listener" rejection path: waitForCode arms the timer.
+	void code.catch(() => {});
+	const fail = (err: Error): void => {
+		if (!settled) {
+			settled = true;
+			rejectCode(err);
+		}
+	};
+	const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+		const target = req.url ?? "/";
+		if (target === "/" || target.startsWith("/?")) {
+			res.writeHead(200, { "content-type": "text/html" }).end(form);
+			return;
+		}
+		if (target.startsWith("/callback")) {
+			const found = callbackCode(target);
+			if (found && !settled) {
+				settled = true;
+				res.writeHead(200, { "content-type": "text/html" }).end("<h1>App created — back to the terminal.</h1>");
+				resolveCode(found);
 				return;
 			}
-			settled = true;
-			clearTimeout(timer);
-			res.writeHead(200, { "content-type": "text/html" }).end("<h1>App created — back to the terminal.</h1>");
-			resolveCode(code);
-		});
-		let resolveCode!: (code: string) => void;
-		const code = new Promise<string>((res) => {
-			resolveCode = res;
-		});
-		const timer = setTimeout(() => {
-			if (!settled) {
-				settled = true;
-				server.close();
-				reject(new Error("timed out waiting for the GitHub redirect (5 min) — re-run and complete the form faster"));
-			}
-		}, CALLBACK_TIMEOUT_MS);
-		timer.unref();
-		server.on("error", reject);
-		server.listen(0, "127.0.0.1", () => {
-			const port = (server.address() as { port: number }).port;
-			resolve({ server, port, code });
-		});
+		}
+		res.writeHead(404, { "content-type": "text/plain" }).end("not found");
 	});
+	server.on("error", fail);
+	return {
+		server,
+		setFormHtml: (html: string): void => {
+			form = html;
+		},
+		waitForCode: (): Promise<string> => {
+			const timer = setTimeout(
+				() => fail(new Error("timed out waiting for the GitHub redirect (5 min) — re-run and complete the form faster")),
+				CALLBACK_TIMEOUT_MS,
+			);
+			timer.unref();
+			void code.finally(() => clearTimeout(timer));
+			return code;
+		},
+	};
 }
 
 interface Conversion {
@@ -225,8 +253,8 @@ interface Conversion {
 	pem: string;
 }
 
-async function exchangeCode(code: string): Promise<Conversion> {
-	const res = await fetch(`${GITHUB_API}/app-manifests/${encodeURIComponent(code)}/conversions`, {
+async function exchangeCode(code: string, apiBase: string = GITHUB_API): Promise<Conversion> {
+	const res = await fetch(`${apiBase}/app-manifests/${encodeURIComponent(code)}/conversions`, {
 		method: "POST",
 		headers: { Accept: "application/vnd.github+json", "User-Agent": "pi-github-app-auth-setup" },
 	});
@@ -238,8 +266,8 @@ async function exchangeCode(code: string): Promise<Conversion> {
 	return { slug: data.slug, clientId: data.client_id, pem: normalizePem(data.pem) };
 }
 
-async function listInstallations(clientId: string, privateKey: string): Promise<InstallationRef[]> {
-	const res = await fetch(`${GITHUB_API}/app/installations`, {
+async function listInstallations(clientId: string, privateKey: string, apiBase: string = GITHUB_API): Promise<InstallationRef[]> {
+	const res = await fetch(`${apiBase}/app/installations`, {
 		headers: {
 			Authorization: `Bearer ${mintJwt(clientId, privateKey)}`,
 			Accept: "application/vnd.github+json",
@@ -254,12 +282,17 @@ async function listInstallations(clientId: string, privateKey: string): Promise<
 	);
 }
 
-async function resolveInstallationId(clientId: string, privateKey: string, slug: string): Promise<string> {
+async function resolveInstallationId(
+	clientId: string,
+	privateKey: string,
+	slug: string,
+	apiBase: string = GITHUB_API,
+): Promise<string> {
 	console.log(`\nInstall the App, then it is detected automatically:\nhttps://github.com/apps/${slug}/installations/new`);
 	openBrowser(`https://github.com/apps/${slug}/installations/new`);
 	const deadline = Date.now() + INSTALL_TIMEOUT_MS;
 	for (;;) {
-		const found = await listInstallations(clientId, privateKey).catch(() => [] as InstallationRef[]);
+		const found = await listInstallations(clientId, privateKey, apiBase).catch(() => [] as InstallationRef[]);
 		const sel = selectInstallation(found);
 		if (sel.kind === "single") return String(sel.id);
 		if (sel.kind === "choose") {
@@ -297,18 +330,22 @@ async function main(argv: string[]): Promise<void> {
 		console.log("App credentials found in the environment — skipping creation.");
 		({ clientId, privateKey } = fromEnv);
 	} else {
-		const { server, port, code: codePromise } = await waitForCode();
+		const setup = createSetupServer();
+		await new Promise<void>((resolve, reject) => {
+			setup.server.once("error", reject);
+			setup.server.listen(0, "127.0.0.1", () => resolve());
+		});
+		const port = (setup.server.address() as { port: number }).port;
 		let conversion: Conversion;
 		try {
 			const { action, manifest } = manifestInput(port, args.org);
-			const formPath = join(tmpdir(), `pi-github-app-manifest-${port}.html`);
-			writeFileSync(formPath, manifestFormHtml(action, manifest), { mode: 0o600 });
+			setup.setFormHtml(manifestFormHtml(action, manifest));
 			console.log("Opening the GitHub App form (pre-filled) — pick a unique name and press Create.");
-			openBrowser(formPath);
-			conversion = await exchangeCode(await codePromise);
+			openBrowser(`http://127.0.0.1:${port}/`);
+			conversion = await exchangeCode(await setup.waitForCode());
 			console.log("App created.");
 		} finally {
-			server.close();
+			setup.server.close();
 		}
 		clientId = conversion!.clientId;
 		privateKey = conversion!.pem;
@@ -370,5 +407,8 @@ export const _setupInternals = {
 	manifestInput,
 	manifestFormHtml,
 	formatEnvrc,
+	createSetupServer,
+	exchangeCode,
+	listInstallations,
 	USAGE,
 };
