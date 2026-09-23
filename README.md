@@ -37,6 +37,12 @@ The extension only provides authentication and isolation. It does not create PRs
 ## Installation
 
 ```bash
+pi install npm:pi-github-app-auth
+```
+
+or from git:
+
+```bash
 pi install git:github.com/tonyputi/pi-github-app-auth
 ```
 
