@@ -23,7 +23,7 @@
 		]
 	},
 	"bin": {
-		"pi-github-app-auth-setup": "./setup.ts"
+		"pi-github-app-auth-setup": "setup.ts"
 	},
 	"files": [
 		"index.ts",

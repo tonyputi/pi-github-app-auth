@@ -308,7 +308,16 @@ async function resolveInstallationId(
 	}
 }
 
+/** The setup CLI runs standalone under plain node, which strips types natively since 22.18. */
+function checkNodeVersion(version: string): void {
+	const [major, minor] = version.split(".").map(Number);
+	if (!Number.isInteger(major) || major < 22 || (major === 22 && (!Number.isInteger(minor) || minor < 18))) {
+		throw new Error(`node ${version} is too old — setup needs node >= 22.18 (native type stripping)`);
+	}
+}
+
 async function main(argv: string[]): Promise<void> {
+	checkNodeVersion(process.versions.node);
 	const args = parseArgs(argv);
 	if (args.help) {
 		console.log(USAGE);
@@ -407,6 +416,7 @@ export const _setupInternals = {
 	manifestFormHtml,
 	formatEnvrc,
 	createAuth,
+	checkNodeVersion,
 	createSetupServer,
 	exchangeCode,
 	listInstallations,
