@@ -40,10 +40,9 @@
  *           matches in favor of global config, so each is outranked here by a
  *           one-char-longer rule that maps the URL back to https://github.com/.
  *
- * Token lifecycle: the App JWT (RS256, `iss` = client id, 9 min exp) is signed in
- * memory with node:crypto, exchanged for an installation token via
- * POST /app/installations/{id}/access_tokens, cached in memory, and refreshed in
- * the background 5 minutes before GitHub's expires_at (with retry). If the token
+ * Token lifecycle: @octokit/auth-app signs the App JWT and exchanges it for
+ * an installation token (cached in memory by the library); a background timer
+ * refreshes 5 minutes before GitHub's expires_at (with retry). If the token
  * is momentarily unavailable, GH_TOKEN gets a sentinel value and git/gh fail fast
  * (no helpers, no prompt, no keyring) instead of silently using the user's
  * personal credentials.
@@ -54,7 +53,7 @@
  *   PI_GITHUB_APP_PRIVATE_KEY       GitHub App PEM private key
  */
 
-import crypto from "node:crypto";
+import { createAppAuth } from "@octokit/auth-app";
 import { execFileSync } from "node:child_process";
 import { globSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -75,7 +74,6 @@ interface CachedToken {
 	expiresAtMs: number;
 }
 
-const GITHUB_API = "https://api.github.com";
 const REFRESH_MARGIN_MS = 5 * 60 * 1000; // refresh this long before expires_at
 const SERVE_MARGIN_MS = 60 * 1000; // stop handing out the cached token this close to expiry
 const REFRESH_RETRY_MS = 30 * 1000;
@@ -118,54 +116,46 @@ function readConfig(): { config?: GitHubAppConfig; error?: string } {
 	return { config: { clientId: clientId!, installationId: installationId!, privateKey } };
 }
 
-/** Sign a short-lived GitHub App JWT (RS256) in memory. Throws on a bad key. */
-function mintAppJwt(config: GitHubAppConfig): string {
-	const now = Math.floor(Date.now() / 1000);
-	const b64url = (obj: object): string => Buffer.from(JSON.stringify(obj)).toString("base64url");
-	const signingInput = `${b64url({ alg: "RS256", typ: "JWT" })}.${b64url({
-		iss: config.clientId,
-		iat: now - 30, // small skew allowance
-		exp: now + 540, // GitHub caps App JWTs at 10 minutes
-	})}`;
-	return `${signingInput}.${crypto.createSign("RSA-SHA256").update(signingInput).sign(config.privateKey, "base64url")}`;
+type AppAuth = ReturnType<typeof createAppAuth>;
+
+/**
+ * JWT signing + installation-token exchange, owned by @octokit/auth-app
+ * (GitHub-maintained; installation tokens cached in memory by the library).
+ *
+ * `appId` receives the App client id: GitHub accepts it as the JWT `iss`
+ * (verified live against the API), so no numeric App id is needed in config.
+ */
+function createAuth(clientId: string, privateKey: string): AppAuth {
+	return createAppAuth({ appId: clientId, privateKey });
 }
 
-async function fetchInstallationToken(config: GitHubAppConfig): Promise<CachedToken> {
-	const res = await fetch(`${GITHUB_API}/app/installations/${encodeURIComponent(config.installationId)}/access_tokens`, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${mintAppJwt(config)}`,
-			Accept: "application/vnd.github+json",
-			"X-GitHub-Api-Version": "2022-11-28",
-			"User-Agent": "pi-github-app-auth",
-		},
-	});
-	if (!res.ok) {
-		let detail = "";
-		try {
-			const body = (await res.json()) as { message?: unknown };
-			if (typeof body.message === "string" && body.message) detail = ` — ${body.message}`;
-		} catch {
-			// non-JSON body: fall back to the status-only message
+async function fetchInstallationToken(auth: AppAuth, config: GitHubAppConfig): Promise<CachedToken> {
+	let token: string;
+	let expiresAt: string;
+	try {
+		({ token, expiresAt } = (await auth({ type: "installation", installationId: config.installationId })) as {
+			token: string;
+			expiresAt: string;
+		});
+	} catch (err) {
+		const status = (err as { status?: unknown }).status;
+		const message = err instanceof Error ? err.message : String(err);
+		const detail = message ? ` — ${message}` : "";
+		if (status === 401) throw new Error(`GitHub rejected the App credentials (HTTP 401; check client id / private key)${detail}`);
+		if (status === 403 || status === 404) {
+			throw new Error(`installation ${config.installationId} not authorized or not found (HTTP ${status})${detail}`);
 		}
-		if (res.status === 401) throw new Error(`GitHub rejected the App JWT (HTTP 401; check client id / private key)${detail}`);
-		if (res.status === 403 || res.status === 404) {
-			throw new Error(`installation ${config.installationId} not authorized or not found (HTTP ${res.status})${detail}`);
-		}
-		throw new Error(`GitHub installation-token request failed (HTTP ${res.status})${detail}`);
+		throw new Error(`GitHub installation-token request failed (HTTP ${status ?? "?"})${detail}`);
 	}
-	const data = (await res.json()) as { token?: unknown; expires_at?: unknown };
-	if (typeof data.token !== "string" || !data.token || typeof data.expires_at !== "string") {
-		throw new Error("malformed GitHub API response (missing token or expires_at)");
-	}
-	const expiresAtMs = Date.parse(data.expires_at);
-	if (!Number.isFinite(expiresAtMs)) throw new Error("malformed GitHub API response (unparsable expires_at)");
-	return { token: data.token, expiresAtMs };
+	const expiresAtMs = Date.parse(expiresAt);
+	if (!token || !Number.isFinite(expiresAtMs)) throw new Error("malformed installation-token response (missing token or expires_at)");
+	return { token, expiresAtMs };
 }
 
 let cached: CachedToken | null = null;
 let refreshTimer: NodeJS.Timeout | null = null;
 let failureReported = false;
+let appAuth: AppAuth | null = null;
 
 function scheduleRefresh(config: GitHubAppConfig, atMs: number): void {
 	if (refreshTimer) clearTimeout(refreshTimer);
@@ -175,7 +165,7 @@ function scheduleRefresh(config: GitHubAppConfig, atMs: number): void {
 
 async function refresh(config: GitHubAppConfig): Promise<void> {
 	try {
-		cached = await fetchInstallationToken(config);
+		cached = await fetchInstallationToken(appAuth!, config);
 		failureReported = false;
 		scheduleRefresh(config, cached.expiresAtMs - REFRESH_MARGIN_MS);
 	} catch (err) {
@@ -347,7 +337,10 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	}
 	// Computed once at load (regenerated on /reload); the SSH guard covers drift.
 	const countersinks = config ? githubCountersinks() : [];
-	if (config) void refresh(config); // token ready long before the agent's first bash call
+	if (config) {
+		appAuth = createAuth(config.clientId, config.privateKey);
+		void refresh(config); // token ready long before the agent's first bash call
+	}
 
 	// Only override bash when fully configured; otherwise stay inert so agent
 	// commands behave exactly as if the extension were not installed.
@@ -386,4 +379,4 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 }
 
 // Exposed for self-check scripts only; pi itself only uses the default export.
-export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, mintAppJwt, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };
+export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, createAuth, fetchInstallationToken, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };

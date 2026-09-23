@@ -3,13 +3,14 @@
  * network: run with `npm test` (Node 22.18+ strips types natively).
  */
 import assert from "node:assert";
-import { generateKeyPairSync, createVerify } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _internals } from "./index.ts";
+import { _setupInternals } from "./setup.ts";
 
-const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
+const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
 
 // --- readConfig -----------------------------------------------------------
 {
@@ -34,17 +35,16 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, pa
 	console.log("ok readConfig");
 }
 
-// --- mintAppJwt -----------------------------------------------------------
+// --- app auth (library-owned JWT; only wiring is ours) -----------------------
 {
-	const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
-	const jwt = mintAppJwt({ clientId: "Iv1abc", installationId: "1", privateKey });
-	const [h, p, s] = jwt.split(".");
+	const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+	const auth = createAuth("Iv1abc", privateKey);
+	const { token } = (await auth({ type: "app" })) as { token: string };
+	const [h, p] = token.split(".");
 	assert.equal(JSON.parse(Buffer.from(h, "base64url").toString()).alg, "RS256");
-	const claims = JSON.parse(Buffer.from(p, "base64url").toString());
-	assert.equal(claims.iss, "Iv1abc");
-	assert.ok(claims.exp - claims.iat === 570, "9 min lifetime + 30s skew");
-	assert.ok(createVerify("RSA-SHA256").update(`${h}.${p}`).verify(publicKey, s, "base64url"), "signature verifies with the App public key");
-	console.log("ok mintAppJwt");
+	assert.equal(JSON.parse(Buffer.from(p, "base64url").toString()).iss, "Iv1abc");
+	assert.equal(typeof fetchInstallationToken, "function", "installation exchange stays awaitable for the background loop");
+	console.log("ok appAuth");
 }
 
 // --- githubSshHosts -------------------------------------------------------
@@ -142,6 +142,90 @@ const { readConfig, mintAppJwt, githubSshHosts, githubCountersinks, agentEnv, pa
 	assert.equal(parseSubcommand("status extra args"), "status");
 	assert.equal(parseSubcommand("bogus"), "bogus");
 	console.log("ok parseSubcommand");
+}
+
+// --- setup (pure parts; browser/API flow is manual) ------------------------
+{
+	const { parseArgs, callbackCode, selectInstallation, normalizePem, manifestInput, manifestFormHtml, formatEnvrc } = _setupInternals;
+
+	assert.deepEqual(parseArgs([]), {});
+	assert.deepEqual(parseArgs(["--org", "acme", "--envrc", "/tmp/x"]), { org: "acme", envrcPath: "/tmp/x" });
+	assert.deepEqual(parseArgs(["--help"]), { help: true });
+	assert.throws(() => parseArgs(["--bogus"]), /unknown argument/);
+	assert.throws(() => parseArgs(["--org"]), /missing value/);
+
+	assert.equal(callbackCode("/callback?code=abc123"), "abc123");
+	assert.equal(callbackCode("/callback?code=abc123&state=x"), "abc123");
+	assert.equal(callbackCode("/callback"), null);
+	assert.equal(callbackCode("/favicon.ico"), null);
+	assert.equal(callbackCode(undefined), null);
+
+	assert.deepEqual(selectInstallation([]), { kind: "none" });
+	assert.deepEqual(selectInstallation([{ id: 1, login: "a" }]), { kind: "single", id: 1 });
+	assert.equal(selectInstallation([{ id: 1, login: "a" }, { id: 2, login: "b" }]).kind, "choose");
+
+	assert.ok(normalizePem("A\\nB").includes("\n"), "escaped newlines restored");
+	assert.ok(normalizePem("A\nB").includes("\n"), "real newlines kept");
+
+	const { action, manifest } = manifestInput(8471);
+	assert.equal(action, "https://github.com/settings/apps/new");
+	assert.deepEqual(manifestInput(8471, "acme").action, "https://github.com/organizations/acme/settings/apps/new");
+	const perms = manifest.default_permissions as Record<string, string>;
+	assert.equal(perms.contents, "write");
+	assert.equal(perms.metadata, "read");
+	assert.equal((manifest as { redirect_url: string }).redirect_url, "http://127.0.0.1:8471/callback");
+
+	const html = manifestFormHtml(action, manifest);
+	assert.ok(html.includes('method="post"') && html.includes('.submit()'), "auto-submitting form posts the manifest");
+	assert.ok(html.includes(action), "form targets the creation endpoint");
+	assert.ok(!html.includes("</script><script"), "no injection point in embedded JSON");
+
+	const block = formatEnvrc("ID", "42", "PEM");
+	assert.ok(block.includes('PI_GITHUB_APP_CLIENT_ID="ID"') && block.includes('PI_GITHUB_APP_INSTALLATION_ID="42"'), "envrc block names");
+	console.log("ok setup");
+}
+
+// --- setup server + API parts (localhost only, no external network) --------
+{
+	const { createAuth, createSetupServer, exchangeCode, listInstallations } = _setupInternals;
+
+	// form serving + code capture
+	const setup = createSetupServer();
+	await new Promise<void>((res, rej) => {
+		setup.server.once("error", rej);
+		setup.server.listen(0, "127.0.0.1", () => res());
+	});
+	const port = (setup.server.address() as { port: number }).port;
+	const base = `http://127.0.0.1:${port}`;
+	setup.setFormHtml("<form>hello</form>");
+	assert.equal(await (await fetch(`${base}/`)).text(), "<form>hello</form>");
+	assert.equal((await fetch(`${base}/nope`)).status, 404);
+	const codePromise = setup.waitForCode();
+	assert.equal((await fetch(`${base}/callback?code=abc123`)).status, 200);
+	assert.equal(await codePromise, "abc123");
+	setup.server.close();
+	console.log("ok setup server");
+
+	// manifest conversion + installation listing against a mock API
+	const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+	const { createServer } = await import("node:http");
+	const api = createServer((req, res) => {
+		res.writeHead(200, { "content-type": "application/json" });
+		if (req.method === "POST") res.end(JSON.stringify({ slug: "my-app", client_id: "Iv1x", pem: privateKey }));
+		else res.end(JSON.stringify([{ id: 7, account: { login: "octo" } }]));
+	});
+	await new Promise<void>((res, rej) => {
+		api.once("error", rej);
+		api.listen(0, "127.0.0.1", () => res());
+	});
+	const apiBase = `http://127.0.0.1:${(api.address() as { port: number }).port}`;
+	const conv = await exchangeCode("single-use", apiBase);
+	assert.equal(conv.slug, "my-app");
+	assert.equal(conv.clientId, "Iv1x");
+	assert.ok(conv.pem.includes("PRIVATE KEY"));
+	assert.deepEqual(await listInstallations(createAuth("Iv1x", privateKey), apiBase), [{ id: 7, login: "octo" }]);
+	api.close();
+	console.log("ok setup api");
 }
 
 console.log("\nall tests passed");
