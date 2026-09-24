@@ -59,7 +59,7 @@ One runtime dependency — `@octokit/auth-app` (GitHub-maintained) for App JWTs 
 Instead of clicking through GitHub settings by hand, one command creates the App (permissions pre-filled), installs it, and emits the `.envrc` block:
 
 ```bash
-npx pi-github-app-auth-setup
+npx --package=pi-github-app-auth pi-github-app-auth-setup
 ```
 
 What happens: a pre-filled App form opens in your browser (pick a unique name, press Create) → the App is created from a manifest, so client id and private key come back automatically → the install page opens → the command detects the installation and prints the three `export` lines. Flags: `--org <name>` for an organization-owned App, `--envrc <path>` to append the block to a file instead of printing it. With `PI_GITHUB_APP_CLIENT_ID` + `PI_GITHUB_APP_PRIVATE_KEY` already set, creation is skipped and only the installation id is resolved.

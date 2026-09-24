@@ -23,11 +23,12 @@
 		]
 	},
 	"bin": {
-		"pi-github-app-auth-setup": "setup.ts"
+		"pi-github-app-auth-setup": "dist/setup.js"
 	},
 	"files": [
 		"index.ts",
 		"setup.ts",
+		"dist/setup.js",
 		"README.md",
 		"LICENSE"
 	],
@@ -43,7 +44,8 @@
 		"typescript": "^7.0.2"
 	},
 	"scripts": {
-		"test": "node test.ts"
+		"test": "node test.ts",
+		"prepublishOnly": "tsc --project tsconfig.setup.json"
 	},
 	"release": {
 		"branches": [
