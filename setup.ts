@@ -29,7 +29,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, realpathSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createAppAuth } from "@octokit/auth-app";
 import { createInterface } from "node:readline/promises";
@@ -399,7 +399,7 @@ function needsLeadingNewline(path: string): boolean {
 	}
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
 	await main(process.argv.slice(2)).catch((err: unknown) => {
 		console.error(`pi-github-app-auth setup: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
