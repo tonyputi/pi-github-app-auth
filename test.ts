@@ -174,6 +174,7 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	assert.equal(perms.contents, "write");
 	assert.equal(perms.metadata, "read");
 	assert.equal((manifest as { redirect_url: string }).redirect_url, "http://127.0.0.1:8471/callback");
+	assert.ok(!("hook_attributes" in manifest), "webhook config omitted when no webhook URL is configured");
 
 	const html = manifestFormHtml(action, manifest);
 	assert.ok(html.includes('method="post"') && html.includes('.submit()'), "auto-submitting form posts the manifest");
