@@ -99,7 +99,6 @@ function manifestInput(port: number, org?: string): ManifestInput {
 		manifest: {
 			url: REPO_URL,
 			redirect_url: `http://127.0.0.1:${port}/callback`,
-			hook_attributes: { active: false },
 			public: false,
 			description: "Authenticates Pi agent bash commands to GitHub as an App installation.",
 			default_permissions: {
