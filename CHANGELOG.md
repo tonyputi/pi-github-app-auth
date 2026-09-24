@@ -1,3 +1,10 @@
+## [0.2.3](https://github.com/tonyputi/pi-github-app-auth/compare/v0.2.2...v0.2.3) (2026-09-24)
+
+
+### Bug Fixes
+
+* omit empty webhook config from setup manifest ([#18](https://github.com/tonyputi/pi-github-app-auth/issues/18)) ([#19](https://github.com/tonyputi/pi-github-app-auth/issues/19)) ([6701054](https://github.com/tonyputi/pi-github-app-auth/commit/6701054316277e2cdfe1b30e1345d7084301d1d5))
+
 ## [0.2.2](https://github.com/tonyputi/pi-github-app-auth/compare/v0.2.1...v0.2.2) (2026-09-24)
 
 
