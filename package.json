@@ -1,6 +1,6 @@
 {
 	"name": "pi-github-app-auth",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"description": "Authenticate Pi agent bash commands to GitHub as a GitHub App installation, without touching your personal git/gh credentials",
 	"license": "MIT",
 	"type": "module",

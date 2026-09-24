@@ -1,3 +1,10 @@
+## [0.2.2](https://github.com/tonyputi/pi-github-app-auth/compare/v0.2.1...v0.2.2) (2026-09-24)
+
+
+### Bug Fixes
+
+* make npm setup CLI executable ([#16](https://github.com/tonyputi/pi-github-app-auth/issues/16)) ([#17](https://github.com/tonyputi/pi-github-app-auth/issues/17)) ([248c7b5](https://github.com/tonyputi/pi-github-app-auth/commit/248c7b5cf1a2bdec525c3fb379ce6025c0785428))
+
 ## [0.2.1](https://github.com/tonyputi/pi-github-app-auth/compare/v0.2.0...v0.2.1) (2026-09-23)
 
 
