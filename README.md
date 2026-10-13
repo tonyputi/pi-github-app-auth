@@ -69,8 +69,6 @@ The security-sensitive parts stay tight: the private key exists in memory only u
 
 Prefer the manual route? Follow GitHub's App guides, then continue below.
 
-> The old `pi-github-app-auth-setup` npm CLI still works but only prints a pointer to `/github-app-auth setup`; it will be removed in 1.0.
-
 ## Configuration
 
 Credentials live in `<agent-dir>/pi-github-app-auth.json` (default `~/.pi/agent/`, override with `PI_CODING_AGENT_DIR`), written by the wizard:
