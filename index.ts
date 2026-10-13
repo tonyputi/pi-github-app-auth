@@ -47,27 +47,33 @@
  * (no helpers, no prompt, no keyring) instead of silently using the user's
  * personal credentials.
  *
- * Configuration (environment variables, e.g. via direnv):
- *   PI_GITHUB_APP_CLIENT_ID         GitHub App client id (JWT `iss`)
- *   PI_GITHUB_APP_INSTALLATION_ID   GitHub App installation id
- *   PI_GITHUB_APP_PRIVATE_KEY       GitHub App PEM private key
+ * Configuration — resolved in this order:
+ *   1. Environment override (per-repo identity, e.g. via direnv):
+ *        PI_GITHUB_APP_CLIENT_ID         GitHub App client id (JWT `iss`)
+ *        PI_GITHUB_APP_INSTALLATION_ID   GitHub App installation id
+ *        PI_GITHUB_APP_PRIVATE_KEY       GitHub App PEM private key
+ *   2. Credential file <agent-dir>/pi-github-app-auth.json (0600), written by
+ *      the in-Pi wizard: /github-app-auth setup
  */
 
-import { createAppAuth } from "@octokit/auth-app";
 import { execFileSync } from "node:child_process";
 import { globSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-interface GitHubAppConfig {
-	/** GitHub App client id — used as the JWT `iss` claim. */
-	clientId: string;
-	/** GitHub App installation id for the token exchange. */
-	installationId: string;
-	/** PEM private key of the GitHub App (real or escaped newlines). */
-	privateKey: string;
-}
+import {
+	createAuth,
+	credentialsPath,
+	readConfig,
+	runSetupWizard,
+	type AppAuth,
+	type GitHubAppConfig,
+	type WizardUI,
+} from "./setup.ts";
+import {
+	createBashToolDefinition,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 
 interface CachedToken {
 	token: string;
@@ -93,41 +99,15 @@ const GITHUB_CREDENTIAL_HELPER = `!f() { sleep 1; if [ "$1" = get ] && [ -n "$GH
 // Non-GitHub hosts pass through to real ssh untouched.
 const GIT_SSH_GUARD = `pi_github_app_guard() { for a in "$@"; do case "$a" in *github.com|*github.com:*) printf 'pi-github-app: GitHub SSH access is blocked in agent shells; use HTTPS (GitHub App). Arg: %s\\n' "$a" >&2; exit 111 ;; esac; done; command ssh "$@"; }; pi_github_app_guard`;
 
-function readConfig(): { config?: GitHubAppConfig; error?: string } {
-	const clientId = process.env.PI_GITHUB_APP_CLIENT_ID?.trim();
-	const installationId = process.env.PI_GITHUB_APP_INSTALLATION_ID?.trim();
-	const rawKey = process.env.PI_GITHUB_APP_PRIVATE_KEY?.trim();
-
-	const present = [clientId, installationId, rawKey].filter((v) => v);
-	if (present.length === 0) return {}; // not configured at all -> stay inert
-	if (present.length < 3) {
-		const missing = [
-			!clientId && "PI_GITHUB_APP_CLIENT_ID",
-			!installationId && "PI_GITHUB_APP_INSTALLATION_ID",
-			!rawKey && "PI_GITHUB_APP_PRIVATE_KEY",
-		].filter(Boolean);
-		return { error: `incomplete configuration — missing ${missing.join(", ")}` };
-	}
-	// Tolerate PEM keys whose newlines were escaped as literal "\n".
-	const privateKey = rawKey!.includes("\\n") && !rawKey!.includes("\n") ? rawKey!.replace(/\\n/g, "\n") : rawKey!;
-	if (!privateKey.includes("BEGIN") || !privateKey.includes("PRIVATE KEY")) {
-		return { error: "PI_GITHUB_APP_PRIVATE_KEY does not look like a PEM private key" };
-	}
-	return { config: { clientId: clientId!, installationId: installationId!, privateKey } };
-}
-
-type AppAuth = ReturnType<typeof createAppAuth>;
 
 /**
  * JWT signing + installation-token exchange, owned by @octokit/auth-app
  * (GitHub-maintained; installation tokens cached in memory by the library).
+ * `createAuth` and config resolution live in setup.ts alongside the wizard.
  *
  * `appId` receives the App client id: GitHub accepts it as the JWT `iss`
  * (verified live against the API), so no numeric App id is needed in config.
  */
-function createAuth(clientId: string, privateKey: string): AppAuth {
-	return createAppAuth({ appId: clientId, privateKey });
-}
 
 async function fetchInstallationToken(auth: AppAuth, config: GitHubAppConfig): Promise<CachedToken> {
 	let token: string;
@@ -329,8 +309,44 @@ function parseSubcommand(args: string): string {
 	return args.trim().split(/\s+/)[0] ?? "";
 }
 
+/** /github-app-auth setup — the manifest-flow wizard, entirely inside Pi. */
+async function runSetupCommand(ctx: ExtensionCommandContext): Promise<void> {
+	if (!ctx.hasUI) {
+		ctx.ui.notify(
+			"github-app-auth: the setup wizard needs an interactive session (pi in a terminal). Headless alternative: create the App manually and set PI_GITHUB_APP_* — see the README.",
+			"warning",
+		);
+		return;
+	}
+	const existing = readConfig();
+	if (existing.config) {
+		const where = existing.source === "env" ? "environment variables (PI_GITHUB_APP_*)" : credentialsPath();
+		const again = await ctx.ui.confirm("github-app-auth", `An App is already configured via ${where}. Create and configure a different one?`);
+		if (!again) return;
+	}
+	const ui: WizardUI = ctx.ui;
+	try {
+		const result = await runSetupWizard(ui);
+		if (!result) return; // cancelled
+		if (process.env.PI_GITHUB_APP_CLIENT_ID?.trim() || process.env.PI_GITHUB_APP_PRIVATE_KEY?.trim()) {
+			ui.notify(
+				"github-app-auth: PI_GITHUB_APP_* environment variables are set and will take precedence over the saved file (per-repo override). The new App only becomes active once they are unset.",
+				"warning",
+			);
+		}
+		const activate = await ctx.ui.confirm(
+			"github-app-auth — setup complete",
+			`App "${result.slug}" installed (installation ${result.installationId}); credentials saved to ${result.path} (mode 0600).\nReload the Pi runtime now to activate? Same as /reload — sessions are preserved.`,
+		);
+		if (activate) await ctx.reload();
+		else ui.notify("github-app-auth: saved. Run /reload when ready to activate.", "info");
+	} catch (err) {
+		ui.notify(`github-app-auth: setup failed — ${err instanceof Error ? err.message : String(err)}`, "error");
+	}
+}
+
 export default function piGithubAppAuth(pi: ExtensionAPI): void {
-	const { config, error } = readConfig();
+	const { config, source, error } = readConfig();
 	if (error) {
 		// Invalid/incomplete config: stay inert — never break the user's session.
 		console.error(`pi-github-app: ${error} — staying inactive; agent git/gh run with your normal credentials (see /github-app-auth status)`);
@@ -357,11 +373,15 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("github-app-auth", {
-		description: "GitHub App auth for agent bash — subcommands: status (no secrets)",
+		description: "GitHub App auth for agent bash — subcommands: status, setup",
 		handler: async (args, ctx) => {
 			const sub = parseSubcommand(args);
+			if (sub === "setup") {
+				await runSetupCommand(ctx);
+				return;
+			}
 			if (sub && sub !== "status" && sub !== "help") {
-				ctx.ui.notify(`github-app-auth: unknown subcommand "${sub}" — try /github-app-auth status`, "warning");
+				ctx.ui.notify(`github-app-auth: unknown subcommand "${sub}" — try /github-app-auth status or /github-app-auth setup`, "warning");
 				return;
 			}
 			const token = config ? currentToken() : null;
@@ -369,9 +389,12 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 			ctx.ui.notify(
 				[
 					config ? "github-app-auth: active (agent bash authenticates as the GitHub App)" : `github-app-auth: NOT active — ${error ?? "not configured"}`,
+					config ? `config source: ${source === "env" ? "environment override (PI_GITHUB_APP_*)" : credentialsPath()}` : "",
 					token ? `installation token: cached in memory, expires ${expiry}` : "installation token: not available right now",
 					"agent bash env: GH_TOKEN + ephemeral git config (credential helper, SSH->HTTPS insteadOf + SSH guard); PI_GITHUB_APP_* removed",
-				].join("\n"),
+				]
+					.filter(Boolean)
+					.join("\n"),
 				config && token ? "info" : "warning",
 			);
 		},

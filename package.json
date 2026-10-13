@@ -23,12 +23,13 @@
 		]
 	},
 	"bin": {
-		"pi-github-app-auth-setup": "dist/setup.js"
+		"pi-github-app-auth-setup": "dist/cli.js"
 	},
 	"files": [
 		"index.ts",
 		"setup.ts",
-		"dist/setup.js",
+		"cli.ts",
+		"dist/cli.js",
 		"README.md",
 		"LICENSE"
 	],
