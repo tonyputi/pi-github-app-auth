@@ -64,7 +64,9 @@ import {
 	createAuth,
 	credentialsPath,
 	readConfig,
+	resolveCommitterIdentity,
 	runSetupWizard,
+	saveStoredCredentials,
 	type AppAuth,
 	type GitHubAppConfig,
 	type WizardUI,
@@ -136,6 +138,8 @@ let cached: CachedToken | null = null;
 let refreshTimer: NodeJS.Timeout | null = null;
 let failureReported = false;
 let appAuth: AppAuth | null = null;
+/** Bot committer identity for attribution, resolved at load (see runAtLoad). */
+let committer: { name: string; email: string } | null = null;
 
 function scheduleRefresh(config: GitHubAppConfig, atMs: number): void {
 	if (refreshTimer) clearTimeout(refreshTimer);
@@ -262,7 +266,12 @@ function githubCountersinks(): Array<[string, string]> {
 	return sinks;
 }
 
-function agentEnv(env: NodeJS.ProcessEnv, token: string | null, countersinks: Array<[string, string]> = []): NodeJS.ProcessEnv {
+function agentEnv(
+	env: NodeJS.ProcessEnv,
+	token: string | null,
+	countersinks: Array<[string, string]> = [],
+	committer: { name: string; email: string } | null = null,
+): NodeJS.ProcessEnv {
 	const next: NodeJS.ProcessEnv = { ...env };
 	// The App key and its coordinates are consumed here — never leaked to a shell.
 	delete next.PI_GITHUB_APP_PRIVATE_KEY;
@@ -282,6 +291,16 @@ function agentEnv(env: NodeJS.ProcessEnv, token: string | null, countersinks: Ar
 		entries.push(["url.https://github.com/.insteadOf", `ssh://git@${host}/`]);
 	}
 	entries.push(...countersinks); // outrank personal global insteadOf rewrites
+	if (committer) {
+		// Attribution: agent commits keep the machine's author identity (the
+		// human behind the launch) while the committer is pinned to the App bot,
+		// so GitHub renders "authored by <you>, committed by <app>[bot]".
+		next.GIT_COMMITTER_NAME = committer.name;
+		next.GIT_COMMITTER_EMAIL = committer.email;
+		// A personal key signing a bot-committed commit would attach the human's
+		// verified badge to machine work — agent commits stay unsigned instead.
+		entries.push(["commit.gpgsign", "false"]);
+	}
 	for (const [i, [key, value]] of entries.entries()) {
 		next[`GIT_CONFIG_KEY_${base + i}`] = key;
 		next[`GIT_CONFIG_VALUE_${base + i}`] = value;
@@ -356,6 +375,18 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	if (config) {
 		appAuth = createAuth(config.clientId, config.privateKey);
 		void refresh(config); // token ready long before the agent's first bash call
+		if (config.committerName && config.committerEmail) {
+			committer = { name: config.committerName, email: config.committerEmail };
+		} else {
+			// Credential file predates attribution (or env override): resolve the
+			// bot identity in the background and cache it back into the file.
+			// Commits before it lands keep the plain per-machine identity.
+			void resolveCommitterIdentity(appAuth).then((found) => {
+				if (!found) return;
+				committer = found;
+				if (source === "file") saveStoredCredentials({ ...config, committerName: found.name, committerEmail: found.email });
+			});
+		}
 	}
 
 	// Only override bash when fully configured; otherwise stay inert so agent
@@ -365,7 +396,7 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 			spawnHook: ({ command, cwd, env }) => ({
 				command,
 				cwd,
-				env: agentEnv(env, config ? currentToken() : null, countersinks),
+				env: agentEnv(env, config ? currentToken() : null, countersinks, committer),
 			}),
 		});
 
@@ -390,6 +421,7 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 				[
 					config ? "github-app-auth: active (agent bash authenticates as the GitHub App)" : `github-app-auth: NOT active — ${error ?? "not configured"}`,
 					config ? `config source: ${source === "env" ? "environment override (PI_GITHUB_APP_*)" : credentialsPath()}` : "",
+					committer ? `commit attribution: agent commits authored by your git identity, committed as ${committer.name}` : "",
 					token ? `installation token: cached in memory, expires ${expiry}` : "installation token: not available right now",
 					"agent bash env: GH_TOKEN + ephemeral git config (credential helper, SSH->HTTPS insteadOf + SSH guard); PI_GITHUB_APP_* removed",
 				]
