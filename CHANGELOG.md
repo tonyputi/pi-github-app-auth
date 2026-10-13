@@ -1,3 +1,10 @@
+# [0.3.0](https://github.com/tonyputi/pi-github-app-auth/compare/v0.2.3...v0.3.0) (2026-10-13)
+
+
+### Features
+
+* **setup:** in-Pi wizard at /github-app-auth setup with 0600 credential file ([#23](https://github.com/tonyputi/pi-github-app-auth/issues/23)) ([d231472](https://github.com/tonyputi/pi-github-app-auth/commit/d2314724b62a1a5c36e4a89d46b7fc3efee5bb07))
+
 ## [0.2.3](https://github.com/tonyputi/pi-github-app-auth/compare/v0.2.2...v0.2.3) (2026-09-24)
 
 
