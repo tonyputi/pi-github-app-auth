@@ -196,6 +196,7 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	const { callbackCode, selectInstallation, normalizePem, defaultAppName, manifestInput, manifestFormHtml } = _setupInternals;
 
 	assert.match(defaultAppName(), /^pi-agent-[a-z0-9-]+-[0-9a-f]{4}$/, "suggested App name is hostname-based + unique suffix");
+	assert.ok(defaultAppName().length <= 34, "suggested App name fits GitHub's 34-char limit");
 
 	assert.equal(callbackCode("/callback?code=abc123"), "abc123");
 	assert.equal(callbackCode("/callback?code=abc123&state=x"), "abc123");

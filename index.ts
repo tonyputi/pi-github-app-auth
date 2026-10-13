@@ -328,6 +328,12 @@ async function runSetupCommand(ctx: ExtensionCommandContext): Promise<void> {
 	try {
 		const result = await runSetupWizard(ui);
 		if (!result) return; // cancelled
+		if (process.env.PI_GITHUB_APP_CLIENT_ID?.trim() || process.env.PI_GITHUB_APP_PRIVATE_KEY?.trim()) {
+			ui.notify(
+				"github-app-auth: PI_GITHUB_APP_* environment variables are set and will take precedence over the saved file (per-repo override). The new App only becomes active once they are unset.",
+				"warning",
+			);
+		}
 		const activate = await ctx.ui.confirm(
 			"github-app-auth — setup complete",
 			`App "${result.slug}" installed (installation ${result.installationId}); credentials saved to ${result.path} (mode 0600).\nReload the Pi runtime now to activate? Same as /reload — sessions are preserved.`,

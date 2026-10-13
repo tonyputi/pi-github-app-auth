@@ -148,8 +148,8 @@ SSH host aliases that resolve to `github.com` in `~/.ssh/config` (including `Inc
 
 ## Security notes
 
-- The private key, JWTs, and installation tokens are never written to disk, logs, or error messages.
-- Nothing in your persistent configuration is modified: `~/.gitconfig`, repository `.git/config`, `gh auth`, keychain, and SSH config stay exactly as they are. All changes are per-process environment.
+- The private key exists in memory until setup writes it once to `<agent-dir>/pi-github-app-auth.json` (mode `0600`, readable only by your user — the same discipline as Pi's own `auth.json`; like any file on your account, it is readable by the agent too). JWTs and installation tokens are never written to disk, logs, or error messages.
+- Nothing in *your* persistent configuration is modified: `~/.gitconfig`, repository `.git/config`, `gh auth`, keychain, and SSH config stay exactly as they are. All changes are per-process environment.
 - Packages run with full system access — review third-party extension source before installing.
 
 ## Troubleshooting

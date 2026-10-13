@@ -182,9 +182,16 @@ export function selectInstallation(
 	return { kind: "choose", options: installations };
 }
 
-/** Suggested App name: hostname-based plus a random suffix for global uniqueness. */
+/** Suggested App name: hostname-based plus a random suffix for global uniqueness.
+ *  GitHub caps App names at 34 chars — cap the hostname portion so the total
+ *  ("pi-agent-" + host + "-" + 4 hex) never exceeds it. */
 export function defaultAppName(): string {
-	const host = hostname().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "local";
+	const host =
+		hostname()
+			.toLowerCase()
+			.replace(/[^a-z0-9-]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 20) || "local";
 	const suffix = Math.random().toString(16).slice(2, 6);
 	return `pi-agent-${host}-${suffix}`;
 }
@@ -443,5 +450,4 @@ export const _setupInternals = {
 	readConfig,
 	runSetupWizard,
 	openBrowser,
-	environment: () => process.env, // test seam: PI_CODING_AGENT_DIR isolation
 };
