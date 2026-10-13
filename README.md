@@ -54,21 +54,38 @@ pi install /absolute/path/to/pi-github-app-auth
 
 One runtime dependency — `@octokit/auth-app` (GitHub-maintained) for App JWTs and installation tokens. Everything else is Node built-ins and the Pi extension API.
 
-## Assisted setup
+## Setup
 
-Instead of clicking through GitHub settings by hand, one command creates the App (permissions pre-filled), installs it, and emits the `.envrc` block:
+The whole setup runs **inside Pi** — no separate commands, no direnv, no restart juggling:
 
 ```bash
-npx --package=pi-github-app-auth pi-github-app-auth-setup
+pi install npm:pi-github-app-auth   # then start pi and run:
+/github-app-auth setup
 ```
 
-What happens: a pre-filled App form opens in your browser (pick a unique name, press Create) → the App is created from a manifest, so client id and private key come back automatically → the install page opens → the command detects the installation and prints the three `export` lines. Flags: `--org <name>` for an organization-owned App, `--envrc <path>` to append the block to a file instead of printing it. With `PI_GITHUB_APP_CLIENT_ID` + `PI_GITHUB_APP_PRIVATE_KEY` already set, creation is skipped and only the installation id is resolved.
+What happens: pick personal account or organization → a pre-filled GitHub App form opens in your browser (name included — just press **Create**) → the App is created from a manifest, so client id and private key come back automatically → the install page opens and the wizard detects the installation → credentials are saved to `<agent-dir>/pi-github-app-auth.json` with mode `0600` (same discipline as Pi's own `auth.json`) → confirm to reload Pi and you're live. Check any time with `/github-app-auth status`.
+
+The security-sensitive parts stay tight: the private key exists in memory only until it is written once to the 0600 file, it never enters the environment, and the local callback server binds to `127.0.0.1` only.
 
 Prefer the manual route? Follow GitHub's App guides, then continue below.
 
+> The old `pi-github-app-auth-setup` npm CLI still works but only prints a pointer to `/github-app-auth setup`; it will be removed in 1.0.
+
 ## Configuration
 
-Three environment variables (typically via direnv):
+Credentials live in `<agent-dir>/pi-github-app-auth.json` (default `~/.pi/agent/`, override with `PI_CODING_AGENT_DIR`), written by the wizard:
+
+```json
+{
+	"clientId": "Iv1xxxxxxxxxxxxxxxx",
+	"installationId": "12345678",
+	"privateKey": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+}
+```
+
+Real newlines in the PEM work as-is; escaped `\n` sequences are tolerated too.
+
+**Environment override** — for per-repo identities (e.g. a different App per project via direnv), the three `PI_GITHUB_APP_*` variables take precedence over the file when set:
 
 | Variable | Meaning |
 | --- | --- |
@@ -84,7 +101,7 @@ export PI_GITHUB_APP_INSTALLATION_ID="12345678"
 export PI_GITHUB_APP_PRIVATE_KEY="$(cat ~/secrets/my-github-app.pem)"
 ```
 
-Real newlines in the PEM work as-is; escaped `\n` sequences are tolerated too.
+Prefer the file when you can: keeping the key out of the environment means your own shells and every unrelated subprocess never see it.
 
 ### GitHub App prerequisites
 
@@ -139,7 +156,7 @@ SSH host aliases that resolve to `github.com` in `~/.ssh/config` (including `Inc
 
 Run `/github-app-auth status` inside Pi (no secrets are shown).
 
-- **`incomplete configuration — missing …`** — one of the three `PI_GITHUB_APP_*` variables is unset or empty. With direnv, `direnv allow` and restart Pi. In this state the extension stays inactive: agent `git`/`gh` commands simply run with your normal credentials — nothing is blocked.
+- **`incomplete configuration — missing …`** — some of the three `PI_GITHUB_APP_*` variables is set but not all (a partial override hides the credential file). Either complete the set or unset them all and rely on the credential file. In this state the extension stays inactive: agent `git`/`gh` commands simply run with your normal credentials — nothing is blocked.
 - **`GitHub rejected the App JWT (HTTP 401)`** — wrong client id, wrong/stale private key, or system clock skew beyond ~1 minute.
 - **`installation … not authorized or not found (HTTP 403/404)`** — the App is not installed on the target account/org, the installation id is wrong, or the App lacks the required permissions.
 - **`GitHub SSH access is blocked in agent shells`** — a remote (or a personal git `insteadOf` rule) pointed at GitHub over SSH in a form the extension could not translate; use an HTTPS remote or check your global `url.*.insteadOf` rules.

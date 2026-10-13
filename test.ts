@@ -4,7 +4,7 @@
  */
 import assert from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _internals } from "./index.ts";
@@ -14,8 +14,9 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 // --- readConfig -----------------------------------------------------------
 {
-	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY"].map((k) => [k, process.env[k]] as const);
+	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR"].map((k) => [k, process.env[k]] as const);
 	for (const [k] of keep) delete process.env[k];
+	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "ghapp-cfg-")); // hermetic: no user credential file in play
 	assert.deepEqual(readConfig(), {}, "unconfigured -> inert");
 
 	process.env.PI_GITHUB_APP_CLIENT_ID = "Iv1test";
@@ -29,10 +30,56 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	process.env.PI_GITHUB_APP_PRIVATE_KEY = privateKey.replace(/\n/g, "\\n");
 	const { config, error } = readConfig();
 	assert.ok(config && !error, "valid escaped-PEM config accepted");
+	assert.equal(readConfig().source, "env", "env config reports its source");
 	assert.ok(config!.privateKey.includes("\n"), "escaped newlines restored");
 
 	for (const [k, v] of keep) if (v !== undefined) process.env[k] = v;
 	console.log("ok readConfig");
+}
+
+// --- credentials store + config resolution (env > file) --------------------
+{
+	const { loadStoredCredentials, saveStoredCredentials, credentialsPath } = _setupInternals;
+	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR"].map((k) => [k, process.env[k]] as const);
+	for (const [k] of keep) delete process.env[k];
+	const dir = mkdtempSync(join(tmpdir(), "ghapp-cred-"));
+	process.env.PI_CODING_AGENT_DIR = join(dir, "nested", "agent"); // save() must create it
+	try {
+		assert.deepEqual(loadStoredCredentials(), {}, "no file -> inert");
+		const pem = "-----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY-----";
+		const savedTo = saveStoredCredentials({ clientId: "Iv1x", installationId: "42", privateKey: pem });
+		assert.equal(savedTo, credentialsPath(), "saved to <agent-dir>/pi-github-app-auth.json");
+		assert.equal(statSync(savedTo).mode & 0o777, 0o600, "credential file is 0600");
+		assert.equal(statSync(join(dir, "nested", "agent")).mode & 0o777, 0o700, "agent dir created 0700");
+		const loaded = loadStoredCredentials();
+		assert.ok(loaded.config && !loaded.error, "roundtrip reads back");
+		assert.equal(loaded.config.clientId, "Iv1x");
+		assert.equal(loaded.config.installationId, "42");
+
+		// resolution: env wins over file; partial env is an error; file used when env is absent
+		process.env.PI_GITHUB_APP_CLIENT_ID = "Iv1env";
+		process.env.PI_GITHUB_APP_INSTALLATION_ID = "7";
+		process.env.PI_GITHUB_APP_PRIVATE_KEY = pem;
+		const envRes = readConfig();
+		assert.equal(envRes.source, "env", "env takes precedence");
+		assert.equal(envRes.config?.clientId, "Iv1env");
+		process.env.PI_GITHUB_APP_PRIVATE_KEY = "not-a-key";
+		assert.ok(readConfig().error?.includes("PEM"), "bogus env key -> PEM error");
+		for (const k of ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY"]) delete process.env[k];
+		const fileRes = readConfig();
+		assert.equal(fileRes.source, "file", "file used when env absent");
+		assert.equal(fileRes.config?.installationId, "42");
+		process.env.PI_GITHUB_APP_CLIENT_ID = "Iv1partial";
+		assert.ok(readConfig().error?.includes("incomplete"), "partial env -> error even with a valid file");
+		delete process.env.PI_GITHUB_APP_CLIENT_ID;
+
+		writeFileSync(credentialsPath(), "{not json");
+		assert.ok(loadStoredCredentials().error?.includes("not valid JSON"), "corrupt file -> error, not throw");
+	} finally {
+		for (const [k, v] of keep) if (v !== undefined) process.env[k] = v;
+		rmSync(dir, { recursive: true, force: true });
+	}
+	console.log("ok credentials store");
 }
 
 // --- app auth (library-owned JWT; only wiring is ours) -----------------------
@@ -146,13 +193,9 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 // --- setup (pure parts; browser/API flow is manual) ------------------------
 {
-	const { parseArgs, callbackCode, selectInstallation, normalizePem, manifestInput, manifestFormHtml, formatEnvrc, checkNodeVersion } = _setupInternals;
+	const { callbackCode, selectInstallation, normalizePem, defaultAppName, manifestInput, manifestFormHtml } = _setupInternals;
 
-	assert.deepEqual(parseArgs([]), {});
-	assert.deepEqual(parseArgs(["--org", "acme", "--envrc", "/tmp/x"]), { org: "acme", envrcPath: "/tmp/x" });
-	assert.deepEqual(parseArgs(["--help"]), { help: true });
-	assert.throws(() => parseArgs(["--bogus"]), /unknown argument/);
-	assert.throws(() => parseArgs(["--org"]), /missing value/);
+	assert.match(defaultAppName(), /^pi-agent-[a-z0-9-]+-[0-9a-f]{4}$/, "suggested App name is hostname-based + unique suffix");
 
 	assert.equal(callbackCode("/callback?code=abc123"), "abc123");
 	assert.equal(callbackCode("/callback?code=abc123&state=x"), "abc123");
@@ -167,9 +210,11 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	assert.ok(normalizePem("A\\nB").includes("\n"), "escaped newlines restored");
 	assert.ok(normalizePem("A\nB").includes("\n"), "real newlines kept");
 
-	const { action, manifest } = manifestInput(8471);
+	const { action, manifest } = manifestInput(8471, {});
 	assert.equal(action, "https://github.com/settings/apps/new");
-	assert.deepEqual(manifestInput(8471, "acme").action, "https://github.com/organizations/acme/settings/apps/new");
+	assert.deepEqual(manifestInput(8471, { org: "acme" }).action, "https://github.com/organizations/acme/settings/apps/new");
+	assert.equal(manifestInput(8471, { name: "pi-agent-x" }).manifest.name, "pi-agent-x", "App name is pre-filled in the manifest");
+	assert.ok(!("name" in manifestInput(8471, {}).manifest), "no name key without a suggestion");
 	const perms = manifest.default_permissions as Record<string, string>;
 	assert.equal(perms.contents, "write");
 	assert.equal(perms.metadata, "read");
@@ -180,14 +225,6 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	assert.ok(html.includes('method="post"') && html.includes('.submit()'), "auto-submitting form posts the manifest");
 	assert.ok(html.includes(action), "form targets the creation endpoint");
 	assert.ok(!html.includes("</script><script"), "no injection point in embedded JSON");
-
-	const block = formatEnvrc("ID", "42", "PEM");
-	assert.ok(block.includes('PI_GITHUB_APP_CLIENT_ID="ID"') && block.includes('PI_GITHUB_APP_INSTALLATION_ID="42"'), "envrc block names");
-
-	checkNodeVersion(process.versions.node); // our own runtime passes
-	assert.throws(() => checkNodeVersion("20.11.0"), /too old/);
-	assert.throws(() => checkNodeVersion("22.17.9"), /too old/);
-	assert.throws(() => checkNodeVersion("garbage"), /too old/);
 	console.log("ok setup");
 }
 
@@ -232,6 +269,21 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	assert.deepEqual(await listInstallations(createAuth("Iv1x", privateKey), apiBase), [{ id: 7, login: "octo" }]);
 	api.close();
 	console.log("ok setup api");
+}
+
+// --- setup wizard (cancel path, fake UI — no network) -----------------------
+{
+	const { runSetupWizard } = _setupInternals;
+	const log: string[] = [];
+	const ui = {
+		select: async () => undefined, // cancel at the very first dialog
+		input: async () => undefined,
+		confirm: async () => false,
+		notify: (message: string) => log.push(message),
+	};
+	assert.equal(await runSetupWizard(ui), null, "cancel at first select -> null, nothing touched");
+	assert.ok(log.some((m) => m.includes("cancelled")), "cancellation is announced");
+	console.log("ok wizard cancel");
 }
 
 console.log("\nall tests passed");

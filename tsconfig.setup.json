@@ -5,5 +5,5 @@
 		"noEmit": false,
 		"outDir": "./dist"
 	},
-	"include": ["setup.ts"]
+	"include": ["cli.ts"]
 }
