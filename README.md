@@ -123,6 +123,8 @@ The extension overrides Pi's built-in `bash` tool and adjusts the environment of
   - `GIT_TERMINAL_PROMPT=0` so git can never fall back to interactive personal credentials.
   - A `GIT_SSH_COMMAND` guard makes any GitHub-bound `ssh` invocation fail loudly instead of silently using a personal SSH key — including rewrites it cannot foresee.
   - Countersink `insteadOf` rules (generated at load from your global git config) so personal URL rewrites cannot drag GitHub URLs back onto personal SSH aliases.
+  - `commit.gpgsign` is disabled so agent commits are never signed with a personal key.
+- `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` pin the **committer** to the App bot while the author stays your own identity — see [Commit attribution](#commit-attribution).
 - `PI_GITHUB_APP_*` variables are **stripped** from the child environment: an agent command like `env` never sees the private key. Only the short-lived installation token is visible to the processes that need it.
 - Personal `GITHUB_TOKEN` inherited from your shell is removed in agent shells so nothing silently falls back to it.
 
@@ -133,6 +135,19 @@ The extension overrides Pi's built-in `bash` tool and adjusts the environment of
 3. A background timer refreshes it **5 minutes before** GitHub's `expires_at` (retrying every 30 s on failure).
 
 If the token is momentarily unavailable, `GH_TOKEN` is given a sentinel value and git/gh fail with a clear error instead of silently using your personal credentials.
+
+## Commit attribution
+
+Agent commands create commits with **your author identity** (the machine's `user.name` / `user.email`) but the **committer pinned to the App bot** — GitHub renders both, so on a shared-App team you can see at a glance who launched the agent and that the commit is machine-made:
+
+```
+authored by alice, committed by pi-agent-x1y2[bot]
+```
+
+- Zero configuration: the identity (App slug + bot user id) is resolved automatically via the GitHub API at setup and cached in the credential file; installs created before this feature resolve it lazily on first use.
+- The pull request itself stays authored by the App, so any teammate — **including the person who launched the agent** — can review it and request changes (GitHub blocks reviews only for the PR author).
+- Agent commits are unsigned (`commit.gpgsign` off inside agent commands): signing machine work with a personal key would attach your verified badge to bot commits. Organizations that require signed commits should sign agent work deliberately.
+- Known limits: rebasing rewrites the committer (attribution is strongest on the commits the agent originally created), and the author identity is per-machine — one human per machine, which is how Pi is normally run.
 
 ## HTTPS and SSH remotes
 

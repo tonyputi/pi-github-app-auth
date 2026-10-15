@@ -287,4 +287,76 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	console.log("ok wizard cancel");
 }
 
+// --- committer attribution -------------------------------------------------
+{
+	const { resolveCommitterIdentity, loadStoredCredentials, saveStoredCredentials, createAuth } = _setupInternals;
+	const { agentEnv } = _internals;
+
+	// env injection (agent shells only)
+	const base = { PATH: "/bin" };
+	const committer = { name: "my-app[bot]", email: "99+my-app[bot]@users.noreply.github.com" };
+	const withComm = agentEnv(base, "tok", [], committer);
+	assert.equal(withComm.GIT_COMMITTER_NAME, "my-app[bot]", "committer name injected");
+	assert.equal(withComm.GIT_COMMITTER_EMAIL, "99+my-app[bot]@users.noreply.github.com", "committer email injected");
+	const gpgsignIdx = 2 + githubSshHosts().length * 2; // after credential entries and host insteadOf rules
+	assert.equal(withComm[`GIT_CONFIG_VALUE_${gpgsignIdx}`], "false", "commit.gpgsign disabled for agent commits");	assert.equal(withComm.GIT_CONFIG_COUNT, String(3 + githubSshHosts().length * 2), "one extra config entry with committer");
+	const withoutComm = agentEnv(base, "tok", []);
+	assert.ok(!("GIT_COMMITTER_NAME" in withoutComm), "no committer -> no injection");
+	assert.ok(!("GIT_COMMITTER_EMAIL" in withoutComm), "no committer -> no email injection");
+	assert.equal(withoutComm.GIT_CONFIG_COUNT, String(2 + githubSshHosts().length * 2), "no extra config entries without committer");
+
+	// resolution against a mock GitHub API
+	const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+	const { createServer } = await import("node:http");
+	const serve = (handler: (url: string | undefined, res: { writeHead: (code: number) => void; end: (b: string) => void }) => void): Promise<{ base: string; close: () => void }> =>
+		new Promise((res) => {
+			const api = createServer((req, resp) => handler(req.url, resp));
+			api.listen(0, "127.0.0.1", () => res({ base: `http://127.0.0.1:${(api.address() as { port: number }).port}`, close: () => api.close() }));
+		});
+	const auth = createAuth("Iv1x", privateKey);
+	const okApi = await serve((url, res) => {
+		res.writeHead(200);
+		if (url === "/app") res.end(JSON.stringify({ slug: "my-app" }));
+		else if (url === "/users/my-app%5Bbot%5D") res.end(JSON.stringify({ id: 99 }));
+		else { res.writeHead(404); res.end("{}"); }
+	});
+	try {
+		assert.deepEqual(
+			await resolveCommitterIdentity(auth, okApi.base),
+			{ name: "my-app[bot]", email: "99+my-app[bot]@users.noreply.github.com" },
+			"slug + bot user id -> noreply email",
+		);
+	} finally {
+		okApi.close();
+	}
+	const badApi = await serve((_url, res) => {
+		res.writeHead(500);
+		res.end("{}");
+	});
+	try {
+		assert.equal(await resolveCommitterIdentity(auth, badApi.base), null, "API failure -> null, no throw");
+	} finally {
+		badApi.close();
+	}
+
+	// credential file roundtrip with committer fields
+	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR"].map((k) => [k, process.env[k]] as const);
+	for (const [k] of keep) delete process.env[k];
+	const dir = mkdtempSync(join(tmpdir(), "ghapp-comm-"));
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		const pem = "-----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY-----";
+		saveStoredCredentials({ clientId: "Iv1x", installationId: "42", privateKey: pem, committerName: committer.name, committerEmail: committer.email });
+		const loaded = loadStoredCredentials();
+		assert.equal(loaded.config?.committerName, "my-app[bot]", "committer fields roundtrip");
+		assert.equal(loaded.config?.committerEmail, "99+my-app[bot]@users.noreply.github.com");
+		saveStoredCredentials({ clientId: "Iv1x", installationId: "42", privateKey: pem });
+		assert.ok(!loadStoredCredentials().config?.committerName, "omitted committer fields stay absent");
+	} finally {
+		for (const [k, v] of keep) if (v !== undefined) process.env[k] = v;
+		rmSync(dir, { recursive: true, force: true });
+	}
+	console.log("ok committer attribution");
+}
+
 console.log("\nall tests passed");
