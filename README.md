@@ -177,6 +177,10 @@ Run `/github-app-auth status` inside Pi (no secrets are shown).
 - **`GitHub SSH access is blocked in agent shells`** — a remote (or a personal git `insteadOf` rule) pointed at GitHub over SSH in a form the extension could not translate; use an HTTPS remote or check your global `url.*.insteadOf` rules.
 - **`pi-github-app-unavailable` appearing as a token error** — the installation token could not be fetched (network/API outage); the extension retries every 30 s and personal credentials are never used as a fallback.
 
+## Code of conduct
+
+This project follows the [Contributor Covenant](https://github.com/tonyputi/pi-github-app-auth/blob/main/.github/CODE_OF_CONDUCT.md) — the same standard used across the wider open-source community.
+
 ## License
 
 MIT
