@@ -1,3 +1,10 @@
+# [0.4.0](https://github.com/tonyputi/pi-github-app-auth/compare/v0.3.0...v0.4.0) (2026-10-15)
+
+
+### Features
+
+* **attribution:** pin agent commits' committer to the App bot ([#25](https://github.com/tonyputi/pi-github-app-auth/issues/25)) ([34cc199](https://github.com/tonyputi/pi-github-app-auth/commit/34cc199c337f4cdf81ecc574f27e5c7594e0eca5))
+
 # [0.3.0](https://github.com/tonyputi/pi-github-app-auth/compare/v0.2.3...v0.3.0) (2026-10-13)
 
 
