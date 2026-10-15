@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an idea for this extension
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a small, security-focused extension: the bar is high on correctness and low on ceremony.
+        Proposals that widen the security surface (new runtime dependencies, credential handling changes) need extra justification.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The problem, not the solution restated.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What alternatives have you considered?
+      description: Existing tools, manual workarounds, configuration that already gets you part of the way.
+    validations:
+      required: false
