@@ -27,6 +27,7 @@
 	},
 	"files": [
 		"index.ts",
+		"gh-guard.ts",
 		"setup.ts",
 		"cli.ts",
 		"dist/cli.js",
@@ -34,7 +35,7 @@
 		"LICENSE"
 	],
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "*"
+		"@earendil-works/pi-coding-agent": "^1.2.0"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "^1.2.0",
@@ -45,7 +46,8 @@
 		"typescript": "^7.0.2"
 	},
 	"scripts": {
-		"test": "node test.ts",
+		"test": "node test.ts && node test-guard.ts",
+		"test:live": "node test-live.ts",
 		"prepublishOnly": "tsc --project tsconfig.setup.json"
 	},
 	"release": {

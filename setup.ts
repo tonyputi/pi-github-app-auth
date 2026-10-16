@@ -96,7 +96,7 @@ function looksLikePem(key: string): boolean {
 	return key.includes("BEGIN") && key.includes("PRIVATE KEY");
 }
 
-/** Read the credential file. Missing file -> inert; anything else broken -> error. */
+/** Read credentials. Missing/broken config never disables bash credential isolation. */
 export function loadStoredCredentials(): ConfigResolution {
 	let text: string;
 	try {
@@ -111,6 +111,7 @@ export function loadStoredCredentials(): ConfigResolution {
 	} catch {
 		return { error: `${credentialsPath()} is not valid JSON` };
 	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { error: `${credentialsPath()} must contain a credentials object` };
 	const o = parsed as Record<string, unknown>;
 	const clientId = typeof o.clientId === "string" ? o.clientId.trim() : "";
 	const installationId = typeof o.installationId === "string" ? o.installationId.trim() : "";

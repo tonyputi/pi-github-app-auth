@@ -6,8 +6,11 @@
  * the user's normal terminal, Pi's manual `!` / `!!` shell, ~/.gitconfig,
  * gh auth, ~/.git-credentials, keychain and SSH config.
  *
- * How it works: overrides the built-in `bash` tool (createBashTool + spawnHook).
- * The synchronous spawnHook adjusts the spawned process environment:
+ * The bash override is always registered, even with missing/broken config.
+ * A token-free gh launcher on its temporary PATH checks the actual credential
+ * before execution and verifies gh pr create's actual PR author afterward.
+ * External execution tools do not inherit this PATH; they are unsupported.
+ * The synchronous spawnHook also adjusts the spawned process environment:
  *
  *   - strips PI_GITHUB_APP_PRIVATE_KEY / _CLIENT_ID / _INSTALLATION_ID
  *     (the App private key is consumed here, never visible to any subprocess)
@@ -41,9 +44,9 @@
  *           one-char-longer rule that maps the URL back to https://github.com/.
  *
  * Token lifecycle: @octokit/auth-app signs the App JWT and exchanges it for
- * an installation token (cached in memory by the library); a background timer
- * refreshes 5 minutes before GitHub's expires_at (with retry). If the token
- * is momentarily unavailable, GH_TOKEN gets a sentinel value and git/gh fail fast
+ * an installation token. Tokens are refreshed on demand before agent commands,
+ * never served in their final minute, and checked again by the gh launcher.
+ * If auth is unavailable, GH_TOKEN gets a sentinel value and git/gh fail fast
  * (no helpers, no prompt, no keyring) instead of silently using the user's
  * personal credentials.
  *
@@ -57,8 +60,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { globSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { globSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { githubJson, installGhGuard } from "./gh-guard.ts";
 import { join } from "node:path";
 import {
 	createAuth,
@@ -82,9 +86,7 @@ interface CachedToken {
 	expiresAtMs: number;
 }
 
-const REFRESH_MARGIN_MS = 5 * 60 * 1000; // refresh this long before expires_at
-const SERVE_MARGIN_MS = 60 * 1000; // stop handing out the cached token this close to expiry
-const REFRESH_RETRY_MS = 30 * 1000;
+const SERVE_MARGIN_MS = 60 * 1000; // never start a command with a nearly expired token
 const GH_SENTINEL = "pi-github-app-unavailable";
 
 // Runs under `sh -c` by git. `sleep 1` lets git finish writing the credential
@@ -93,7 +95,7 @@ const GH_SENTINEL = "pi-github-app-unavailable";
 // above means this is the ONLY helper: nothing personal is consulted, and the
 // "store" action is a no-op, so the installation token is never persisted.
 // The sentinel check keeps the no-token guard state a clean local failure.
-const GITHUB_CREDENTIAL_HELPER = `!f() { sleep 1; if [ "$1" = get ] && [ -n "$GH_TOKEN" ] && [ "$GH_TOKEN" != "${GH_SENTINEL}" ]; then printf 'username=x-access-token\\npassword=%s\\n' "$GH_TOKEN"; fi; }; f`;
+const GITHUB_CREDENTIAL_HELPER = `!f() { sleep 1; if [ "$1" = get ]; then if [ -n "$GH_TOKEN" ] && [ "$GH_TOKEN" != "${GH_SENTINEL}" ]; then printf 'username=x-access-token\\npassword=%s\\n' "$GH_TOKEN"; else printf 'pi-github-app: App token unavailable; run /github-app-auth setup or /reload. No personal credentials allowed.\\n' >&2; fi; fi; }; f`;
 
 // Any GitHub-bound ssh invocation inside agent shells fails loudly instead of
 // silently using personal SSH keys (catches insteadOf rewrites this extension
@@ -115,56 +117,22 @@ async function fetchInstallationToken(auth: AppAuth, config: GitHubAppConfig): P
 	let token: string;
 	let expiresAt: string;
 	try {
-		({ token, expiresAt } = (await auth({ type: "installation", installationId: config.installationId })) as {
+		({ token, expiresAt } = (await auth({ type: "installation", installationId: config.installationId, refresh: true })) as {
 			token: string;
 			expiresAt: string;
 		});
 	} catch (err) {
 		const status = (err as { status?: unknown }).status;
-		const message = err instanceof Error ? err.message : String(err);
-		const detail = message ? ` — ${message}` : "";
-		if (status === 401) throw new Error(`GitHub rejected the App credentials (HTTP 401; check client id / private key)${detail}`);
+		// Octokit errors can carry request credentials. Never forward their text.
+		if (status === 401) throw new Error("GitHub rejected the App credentials (HTTP 401; check client id / private key)");
 		if (status === 403 || status === 404) {
-			throw new Error(`installation ${config.installationId} not authorized or not found (HTTP ${status})${detail}`);
+			throw new Error(`installation not authorized or not found (HTTP ${status})`);
 		}
-		throw new Error(`GitHub installation-token request failed (HTTP ${status ?? "?"})${detail}`);
+		throw new Error(`GitHub installation-token request failed (HTTP ${typeof status === "number" ? status : "?"})`);
 	}
 	const expiresAtMs = Date.parse(expiresAt);
-	if (!token || !Number.isFinite(expiresAtMs)) throw new Error("malformed installation-token response (missing token or expires_at)");
+	if (typeof token !== "string" || !token || !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now() + SERVE_MARGIN_MS) throw new Error("installation-token response is missing, expired or too close to expiry");
 	return { token, expiresAtMs };
-}
-
-let cached: CachedToken | null = null;
-let refreshTimer: NodeJS.Timeout | null = null;
-let failureReported = false;
-let appAuth: AppAuth | null = null;
-/** Bot committer identity for attribution, resolved at load (see runAtLoad). */
-let committer: { name: string; email: string } | null = null;
-
-function scheduleRefresh(config: GitHubAppConfig, atMs: number): void {
-	if (refreshTimer) clearTimeout(refreshTimer);
-	refreshTimer = setTimeout(() => void refresh(config), Math.max(atMs - Date.now(), 0));
-	refreshTimer.unref();
-}
-
-async function refresh(config: GitHubAppConfig): Promise<void> {
-	try {
-		cached = await fetchInstallationToken(appAuth!, config);
-		failureReported = false;
-		scheduleRefresh(config, cached.expiresAtMs - REFRESH_MARGIN_MS);
-	} catch (err) {
-		if (!failureReported) {
-			failureReported = true;
-			console.error(`pi-github-app: ${err instanceof Error ? err.message : String(err)} — will retry; agent git/gh commands will fail rather than use personal credentials`);
-		}
-		scheduleRefresh(config, Date.now() + REFRESH_RETRY_MS);
-	}
-}
-
-/** The cached token, but never in its final minute (refresh has 5 min of runway). */
-function currentToken(): string | null {
-	if (!cached || Date.now() >= cached.expiresAtMs - SERVE_MARGIN_MS) return null;
-	return cached.token;
 }
 
 /**
@@ -318,6 +286,13 @@ function agentEnv(
 	// prefer GH_TOKEN, but other tools read GITHUB_TOKEN — keep agent shells
 	// GitHub-App-only.
 	delete next.GITHUB_TOKEN;
+	delete next.GH_ENTERPRISE_TOKEN;
+	delete next.GITHUB_ENTERPRISE_TOKEN;
+	delete next.GH_DEBUG;
+	// Shell startup hooks must not silently restore ambient personal credentials.
+	delete next.BASH_ENV;
+	delete next.ENV;
+	next.GH_HOST = "github.com";
 	// Fail loudly rather than ever using personal SSH keys for GitHub hosts.
 	next.GIT_SSH_COMMAND = GIT_SSH_GUARD;
 	return next;
@@ -366,42 +341,64 @@ async function runSetupCommand(ctx: ExtensionCommandContext): Promise<void> {
 
 export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	const { config, source, error } = readConfig();
-	if (error) {
-		// Invalid/incomplete config: stay inert — never break the user's session.
-		console.error(`pi-github-app: ${error} — staying inactive; agent git/gh run with your normal credentials (see /github-app-auth status)`);
+	const countersinks = githubCountersinks();
+	let cached: CachedToken | null = null;
+	let bot = "";
+	let committer: { name: string; email: string } | null = null;
+	let preparing: Promise<void> | null = null;
+	let authError = error ?? (config ? "token not requested yet" : "not configured; run /github-app-auth setup");
+	const currentToken = (): string | null => cached && Date.now() < cached.expiresAtMs - SERVE_MARGIN_MS ? cached.token : null;
+	async function prepare(): Promise<void> {
+		if (!config || currentToken()) return;
+		if (preparing) return preparing;
+		preparing = (async () => {
+			try {
+				const auth = createAuth(config!.clientId, config!.privateKey);
+				const candidate = await fetchInstallationToken(auth, config!);
+				const jwt = await auth({ type: "app" });
+				const app = await githubJson("/app", jwt.token);
+				if (typeof app.slug !== "string" || !/^[a-z0-9-]+$/.test(app.slug)) throw new Error("Cannot verify the configured App bot identity");
+				await githubJson("/installation/repositories?per_page=1", candidate.token);
+				bot = `${app.slug}[bot]`;
+				committer = config!.committerName === bot && config!.committerEmail
+					? { name: bot, email: config!.committerEmail }
+					: await resolveCommitterIdentity(auth);
+				if (source === "file" && committer) {
+					try { saveStoredCredentials({ ...config!, committerName: committer.name, committerEmail: committer.email }); }
+					catch { /* Attribution cache is optional; authentication is not. */ }
+				}
+				cached = candidate;
+				authError = "";
+			} catch {
+				cached = null;
+				authError = "App token/identity unavailable; check configuration and GitHub access, then retry (no personal fallback)";
+			}
+		})().finally(() => { preparing = null; });
+		return preparing;
 	}
-	// Computed once at load (regenerated on /reload); the SSH guard covers drift.
-	const countersinks = config ? githubCountersinks() : [];
-	if (config) {
-		appAuth = createAuth(config.clientId, config.privateKey);
-		void refresh(config); // token ready long before the agent's first bash call
-		if (config.committerName && config.committerEmail) {
-			committer = { name: config.committerName, email: config.committerEmail };
-		} else {
-			// Credential file predates attribution (or env override): resolve the
-			// bot identity in the background and cache it back into the file.
-			// Commits before it lands keep the plain per-machine identity.
-			void resolveCommitterIdentity(appAuth).then((found) => {
-				if (!found) return;
-				committer = found;
-				if (source === "file") saveStoredCredentials({ ...config, committerName: found.name, committerEmail: found.email });
-			});
-		}
-	}
-
-	// Only override bash when fully configured; otherwise stay inert so agent
-	// commands behave exactly as if the extension were not installed.
-	if (config) {
-		const bashTool = createBashToolDefinition(process.cwd(), {
-			spawnHook: ({ command, cwd, env }) => ({
-				command,
-				cwd,
-				env: agentEnv(env, config ? currentToken() : null, countersinks, committer),
-			}),
-		});
-
-		pi.registerTool(bashTool);
-	}
+	let realGh = "/gh-not-installed";
+	try { realGh = execFileSync("which", ["gh"], { encoding: "utf8" }).trim().split("\n")[0]; } catch { /* The launcher fails closed if gh is absent. */ }
+	const bashTool = createBashToolDefinition(process.cwd());
+	pi.registerTool({
+		...bashTool,
+		promptGuidelines: [...(bashTool.promptGuidelines ?? []), "Run GitHub commands only via this protected bash tool, including from codemode. Never use ctx_execute, MCP, custom execution tools or unverified subagents for GitHub mutations. Use normal gh pr create (not an absolute gh path or browser creation); the launcher verifies the installation token and actual PR author. This is not an OS sandbox."],
+		async execute(id, params, signal, onUpdate, ctx) {
+			if (process.platform === "win32") throw new Error("pi-github-app-auth's guarded bash launcher supports macOS/Linux only; Windows agent bash is blocked rather than using personal credentials");
+			await prepare();
+			const token = currentToken();
+			const dir = mkdtempSync(join(tmpdir(), "pi-github-app-"));
+			try {
+				installGhGuard(dir, realGh, bot, token);
+				const guarded = createBashToolDefinition(ctx.cwd, {
+					spawnHook: ({ command, cwd, env }) => ({ command, cwd, env: { ...agentEnv(env, token, countersinks, committer), PATH: `${dir}:${env.PATH ?? ""}` } }),
+				});
+				return await guarded.execute(id, params, signal, onUpdate, ctx);
+			} finally { rmSync(dir, { recursive: true, force: true }); }
+		},
+	});
+	pi.on("tool_call", (event) => {
+		if (unsupportedGithubTool(event.toolName, event.input)) return { block: true, reason: "GitHub access through this tool is NOT protected. Run the command through the pi-github-app-auth bash tool instead (including tools.bash from codemode)." };
+	});
 
 	pi.registerCommand("github-app-auth", {
 		description: "GitHub App auth for agent bash — subcommands: status, setup",
@@ -419,11 +416,16 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 			const expiry = cached ? new Date(cached.expiresAtMs).toLocaleTimeString() : "—";
 			ctx.ui.notify(
 				[
-					config ? "github-app-auth: active (agent bash authenticates as the GitHub App)" : `github-app-auth: NOT active — ${error ?? "not configured"}`,
+					`github-app-auth: configured=${Boolean(config)}; bash interception registered=yes (even without config)`,
+					`bash tool active in model loadout: ${pi.getActiveTools().includes("bash")}`,
+					authError ? `auth: ${authError}` : `verified App: ${bot}`,
 					config ? `config source: ${source === "env" ? "environment override (PI_GITHUB_APP_*)" : credentialsPath()}` : "",
 					committer ? `commit attribution: agent commits authored by your git identity, committed as ${committer.name}` : "",
 					token ? `installation token: cached in memory, expires ${expiry}` : "installation token: not available right now",
-					"agent bash env: GH_TOKEN + ephemeral git config (credential helper, SSH->HTTPS insteadOf + SSH guard); PI_GITHUB_APP_* removed",
+					"agent bash: GH_TOKEN + ephemeral git config + guarded gh on PATH; unavailable auth fails closed",
+					"scope: normal gh pr create in this bash only; preflight installation-token check + postflight PR author check",
+					"NOT protected: external ctx_execute/MCP/custom execution, absolute gh paths, altered PATH, explicit credential overrides, detached processes, subagents without this extension",
+					"human terminal and Pi !/!! manual shell: personal credentials, deliberately outside protection",
 				]
 					.filter(Boolean)
 					.join("\n"),
@@ -433,5 +435,12 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	});
 }
 
+/** Early diagnostics for known bypasses, not a parser or a sandbox for arbitrary code. */
+function unsupportedGithubTool(name: string, input: unknown): boolean {
+	if (name === "bash") return false;
+	if (/github|create_?pull_?request/i.test(name)) return true;
+	return /ctx_(execute|execute_file|batch_execute)$/.test(name) && /\bgh\b|github\.com|git[\s'",]+push/.test(JSON.stringify(input) ?? "");
+}
+
 // Exposed for self-check scripts only; pi itself only uses the default export.
-export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, createAuth, fetchInstallationToken, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };
+export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, createAuth, fetchInstallationToken, parseSubcommand, unsupportedGithubTool, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };
