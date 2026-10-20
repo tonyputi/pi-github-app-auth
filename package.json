@@ -29,6 +29,7 @@
 		"index.ts",
 		"setup.ts",
 		"cli.ts",
+		"test-live.ts",
 		"dist/cli.js",
 		"README.md",
 		"LICENSE"
@@ -46,6 +47,7 @@
 	},
 	"scripts": {
 		"test": "node test.ts",
+		"test:live": "node test-live.ts",
 		"prepublishOnly": "tsc --project tsconfig.setup.json"
 	},
 	"release": {
