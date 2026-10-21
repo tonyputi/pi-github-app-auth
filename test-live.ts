@@ -35,7 +35,7 @@ const bot = `${app.slug}[bot]`;
 // Deliberately personal parent CLI. The agent children must replace these creds.
 function humanApi(path: string, method = "GET", body?: object): any {
 	const result = spawnSync("gh", ["api", path, "--method", method, ...(body ? ["--input", "-"] : [])], { input: body ? JSON.stringify(body) : undefined, encoding: "utf8" });
-	assert.equal(result.status, 0, `Human API ${method} ${path} failed; credentials are not printed`);
+	assert.equal(result.status, 0, `Human API ${method} ${path} failed: ${result.stderr.trim().slice(0, 400) || "(no stderr)"} — gh api errors never contain credentials`);
 	return result.stdout ? JSON.parse(result.stdout) : undefined;
 }
 const human = humanApi("user").login;
