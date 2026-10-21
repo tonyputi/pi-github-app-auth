@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _internals } from "./index.ts";
+import piGithubAppAuth from "./index.ts";
 import { _setupInternals } from "./setup.ts";
 
 const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
@@ -17,7 +18,7 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR"].map((k) => [k, process.env[k]] as const);
 	for (const [k] of keep) delete process.env[k];
 	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "ghapp-cfg-")); // hermetic: no user credential file in play
-	assert.deepEqual(readConfig(), {}, "unconfigured -> inert");
+	assert.deepEqual(readConfig(), {}, "unconfigured -> no config (the extension now fails closed instead of staying inert)");
 
 	process.env.PI_GITHUB_APP_CLIENT_ID = "Iv1test";
 	process.env.PI_GITHUB_APP_INSTALLATION_ID = "123";
@@ -178,6 +179,28 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	assert.equal(offsetEnv[`GIT_CONFIG_KEY_${sinkIdx}`], "url.a.insteadOf", "countersinks appended after host rules");
 	assert.equal(offsetEnv.GIT_CONFIG_COUNT, String(sinkIdx + 1));
 	console.log("ok agentEnv");
+}
+
+// --- fail-closed bash override, even unconfigured (issue #29) --------------
+{
+	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR"].map((k) => [k, process.env[k]] as const);
+	for (const [k] of keep) delete process.env[k];
+	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "ghapp-failclosed-")); // hermetic: no config anywhere
+	try {
+		const registered: Array<{ name?: string; execute?: (...args: any[]) => Promise<unknown> }> = [];
+		const fakePi = { registerTool: (t: { name?: string; execute?: (...args: any[]) => Promise<unknown> }) => registered.push(t), registerCommand: () => {}, on: () => {} };
+		piGithubAppAuth(fakePi as never);
+		const bash = registered.find((t) => t.name === "bash");
+		assert.ok(bash?.execute, "unconfigured extension must still override bash (no silent personal fallback, #29)");
+		// Real spawn through the same spawnHook the agent uses. The child may not
+		// echo token values: the sentinel equality check is the observable.
+		const probe = `if [ "$GH_TOKEN" = "${GH_SENTINEL}" ] && [ -z "$GITHUB_TOKEN" ]; then echo FAIL-CLOSED-OK; fi`;
+		const result = await bash.execute!("t", { command: probe }, undefined, undefined, { cwd: process.cwd(), sessionManager: { getSessionId: () => "test", getSessionFile: () => undefined } });
+		assert.ok(JSON.stringify(result).includes("FAIL-CLOSED-OK"), "unconfigured agent bash must run with the sentinel token, not personal credentials");
+	} finally {
+		for (const [k, v] of keep) if (v !== undefined) process.env[k] = v;
+	}
+	console.log("ok fail-closed registration");
 }
 
 // --- parseSubcommand ------------------------------------------------------
