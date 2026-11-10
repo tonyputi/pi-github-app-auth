@@ -367,11 +367,13 @@ async function runSetupCommand(ctx: ExtensionCommandContext): Promise<void> {
 export default function piGithubAppAuth(pi: ExtensionAPI): void {
 	const { config, source, error } = readConfig();
 	if (error) {
-		// Invalid/incomplete config: stay inert — never break the user's session.
-		console.error(`pi-github-app: ${error} — staying inactive; agent git/gh run with your normal credentials (see /github-app-auth status)`);
+		// Invalid/incomplete config: the session keeps working, but agent git/gh
+		// fail closed below — never a silent personal-credential fallback (#29).
+		console.error(`pi-github-app: ${error} — agent git/gh are BLOCKED (no personal fallback) until this is fixed; run /github-app-auth setup`);
 	}
 	// Computed once at load (regenerated on /reload); the SSH guard covers drift.
-	const countersinks = config ? githubCountersinks() : [];
+	// Computed even when unconfigured: the env guard is what enforces fail-closed.
+	const countersinks = githubCountersinks();
 	if (config) {
 		appAuth = createAuth(config.clientId, config.privateKey);
 		void refresh(config); // token ready long before the agent's first bash call
@@ -389,19 +391,19 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 		}
 	}
 
-	// Only override bash when fully configured; otherwise stay inert so agent
-	// commands behave exactly as if the extension were not installed.
-	if (config) {
-		const bashTool = createBashToolDefinition(process.cwd(), {
-			spawnHook: ({ command, cwd, env }) => ({
-				command,
-				cwd,
-				env: agentEnv(env, config ? currentToken() : null, countersinks, committer),
-			}),
-		});
+	// Always override bash, even unconfigured/broken: staying inert would make
+	// agent git/gh fall back to the user's personal GitHub credentials (#29).
+	// currentToken() is null without config or before the first token arrives;
+	// agentEnv then injects a sentinel so git/gh fail loudly instead.
+	const bashTool = createBashToolDefinition(process.cwd(), {
+		spawnHook: ({ command, cwd, env }) => ({
+			command,
+			cwd,
+			env: agentEnv(env, currentToken(), countersinks, committer),
+		}),
+	});
 
-		pi.registerTool(bashTool);
-	}
+	pi.registerTool(bashTool);
 
 	pi.registerCommand("github-app-auth", {
 		description: "GitHub App auth for agent bash — subcommands: status, setup",
@@ -419,7 +421,7 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 			const expiry = cached ? new Date(cached.expiresAtMs).toLocaleTimeString() : "—";
 			ctx.ui.notify(
 				[
-					config ? "github-app-auth: active (agent bash authenticates as the GitHub App)" : `github-app-auth: NOT active — ${error ?? "not configured"}`,
+					config ? "github-app-auth: active (agent bash authenticates as the GitHub App)" : `github-app-auth: NOT active — ${error ?? "not configured"}; agent git/gh fail closed (no personal fallback)`,
 					config ? `config source: ${source === "env" ? "environment override (PI_GITHUB_APP_*)" : credentialsPath()}` : "",
 					committer ? `commit attribution: agent commits authored by your git identity, committed as ${committer.name}` : "",
 					token ? `installation token: cached in memory, expires ${expiry}` : "installation token: not available right now",
