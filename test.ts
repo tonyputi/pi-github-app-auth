@@ -1,52 +1,74 @@
 /**
- * Self-check for the pure helpers exported via _internals. No framework, no
- * network: run with `npm test` (Node 22.18+ strips types natively).
+ * Offline self-checks. No framework or external network:
+ * run with `npm test` (Node 22.18+ strips types natively).
  */
 import assert from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { _internals } from "./index.ts";
-import piGithubAppAuth from "./index.ts";
-import { _setupInternals } from "./setup.ts";
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import piGithubAppAuth, { _internals } from "./index.ts";
+import {
+	callbackCode,
+	createAuth,
+	createSetupServer,
+	credentialsPath,
+	defaultAppName,
+	exchangeCode,
+	listInstallations,
+	loadStoredCredentials,
+	manifestFormHtml,
+	manifestInput,
+	normalizePem,
+	readConfig,
+	resolveCommitterIdentity,
+	runSetupWizard,
+	saveStoredCredentials,
+} from "./setup.ts";
 
-const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
+const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
 
 // --- readConfig -----------------------------------------------------------
 {
 	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR"].map((k) => [k, process.env[k]] as const);
 	for (const [k] of keep) delete process.env[k];
-	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "ghapp-cfg-")); // hermetic: no user credential file in play
-	assert.deepEqual(readConfig(), {}, "unconfigured -> no config (the extension now fails closed instead of staying inert)");
+	const dir = mkdtempSync(join(tmpdir(), "ghapp-cfg-"));
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		assert.deepEqual(readConfig(), {}, "unconfigured -> no config (the extension now fails closed instead of staying inert)");
 
-	process.env.PI_GITHUB_APP_CLIENT_ID = "Iv1test";
-	process.env.PI_GITHUB_APP_INSTALLATION_ID = "123";
-	assert.ok(readConfig().error?.includes("PI_GITHUB_APP_PRIVATE_KEY"), "partial config -> error names the missing var");
+		process.env.PI_GITHUB_APP_CLIENT_ID = "Iv1test";
+		process.env.PI_GITHUB_APP_INSTALLATION_ID = "123";
+		assert.ok(readConfig().error?.includes("PI_GITHUB_APP_PRIVATE_KEY"), "partial config -> error names the missing var");
 
-	const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
-	process.env.PI_GITHUB_APP_PRIVATE_KEY = "not-a-key";
-	assert.ok(readConfig().error?.includes("PEM"), "bogus key -> PEM error");
+		const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+		process.env.PI_GITHUB_APP_PRIVATE_KEY = "not-a-key";
+		assert.ok(readConfig().error?.includes("PEM"), "bogus key -> PEM error");
 
-	process.env.PI_GITHUB_APP_PRIVATE_KEY = privateKey.replace(/\n/g, "\\n");
-	const { config, error } = readConfig();
-	assert.ok(config && !error, "valid escaped-PEM config accepted");
-	assert.equal(readConfig().source, "env", "env config reports its source");
-	assert.ok(config!.privateKey.includes("\n"), "escaped newlines restored");
-
-	for (const [k, v] of keep) if (v !== undefined) process.env[k] = v;
+		process.env.PI_GITHUB_APP_PRIVATE_KEY = privateKey.replace(/\n/g, "\\n");
+		const { config, error } = readConfig();
+		assert.ok(config && !error, "valid escaped-PEM config accepted");
+		assert.equal(readConfig().source, "env", "env config reports its source");
+		assert.ok(config!.privateKey.includes("\n"), "escaped newlines restored");
+	} finally {
+		for (const [k, v] of keep) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+		rmSync(dir, { recursive: true, force: true });
+	}
 	console.log("ok readConfig");
 }
 
 // --- credentials store + config resolution (env > file) --------------------
 {
-	const { loadStoredCredentials, saveStoredCredentials, credentialsPath } = _setupInternals;
 	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR"].map((k) => [k, process.env[k]] as const);
 	for (const [k] of keep) delete process.env[k];
 	const dir = mkdtempSync(join(tmpdir(), "ghapp-cred-"));
 	process.env.PI_CODING_AGENT_DIR = join(dir, "nested", "agent"); // save() must create it
 	try {
-		assert.deepEqual(loadStoredCredentials(), {}, "no file -> inert");
+		assert.deepEqual(loadStoredCredentials(), {}, "no file -> no config");
 		const pem = "-----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY-----";
 		const savedTo = saveStoredCredentials({ clientId: "Iv1x", installationId: "42", privateKey: pem });
 		assert.equal(savedTo, credentialsPath(), "saved to <agent-dir>/pi-github-app-auth.json");
@@ -76,8 +98,15 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 		writeFileSync(credentialsPath(), "{not json");
 		assert.ok(loadStoredCredentials().error?.includes("not valid JSON"), "corrupt file -> error, not throw");
+		for (const value of [null, [], "text", 42, true]) {
+			writeFileSync(credentialsPath(), JSON.stringify(value));
+			assert.ok(loadStoredCredentials().error?.includes("JSON object"), "non-object JSON -> error, not throw");
+		}
 	} finally {
-		for (const [k, v] of keep) if (v !== undefined) process.env[k] = v;
+		for (const [k, v] of keep) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
 		rmSync(dir, { recursive: true, force: true });
 	}
 	console.log("ok credentials store");
@@ -183,22 +212,32 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 // --- fail-closed bash override, even unconfigured (issue #29) --------------
 {
-	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR"].map((k) => [k, process.env[k]] as const);
+	const keep: Array<[string, string | undefined]> = ["PI_GITHUB_APP_CLIENT_ID", "PI_GITHUB_APP_INSTALLATION_ID", "PI_GITHUB_APP_PRIVATE_KEY", "PI_CODING_AGENT_DIR", "GH_TOKEN", "GITHUB_TOKEN"].map((k) => [k, process.env[k]] as const);
 	for (const [k] of keep) delete process.env[k];
-	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "ghapp-failclosed-")); // hermetic: no config anywhere
+	const dir = mkdtempSync(join(tmpdir(), "ghapp-failclosed-"));
+	process.env.PI_CODING_AGENT_DIR = dir;
+	process.env.GH_TOKEN = "personal-test-token";
+	process.env.GITHUB_TOKEN = "personal-test-token";
 	try {
-		const registered: Array<{ name?: string; execute?: (...args: any[]) => Promise<unknown> }> = [];
-		const fakePi = { registerTool: (t: { name?: string; execute?: (...args: any[]) => Promise<unknown> }) => registered.push(t), registerCommand: () => {}, on: () => {} };
-		piGithubAppAuth(fakePi as never);
-		const bash = registered.find((t) => t.name === "bash");
-		assert.ok(bash?.execute, "unconfigured extension must still override bash (no silent personal fallback, #29)");
-		// Real spawn through the same spawnHook the agent uses. The child may not
-		// echo token values: the sentinel equality check is the observable.
-		const probe = `if [ "$GH_TOKEN" = "${GH_SENTINEL}" ] && [ -z "$GITHUB_TOKEN" ]; then echo FAIL-CLOSED-OK; fi`;
-		const result = await bash.execute!("t", { command: probe }, undefined, undefined, { cwd: process.cwd(), sessionManager: { getSessionId: () => "test", getSessionFile: () => undefined } });
-		assert.ok(JSON.stringify(result).includes("FAIL-CLOSED-OK"), "unconfigured agent bash must run with the sentinel token, not personal credentials");
+		for (const contents of [undefined, "null", "[]", "{broken", "{}"]) {
+			if (contents !== undefined) writeFileSync(credentialsPath(), contents);
+			const registered: ToolDefinition[] = [];
+			const fakePi = { registerTool: (tool: ToolDefinition) => registered.push(tool), registerCommand: () => {} };
+			piGithubAppAuth(fakePi as unknown as ExtensionAPI);
+			const bash = registered.find((tool) => tool.name === "bash");
+			assert.ok(bash, "missing or invalid config must still register protected bash");
+			// Observe the guard without printing token values.
+			const probe = `if [ "$GH_TOKEN" = "${GH_SENTINEL}" ] && [ -z "$GITHUB_TOKEN" ]; then echo FAIL-CLOSED-OK; fi`;
+			const ctx = { cwd: process.cwd(), sessionManager: { getSessionId: () => "test", getSessionFile: () => undefined } } as ExtensionToolContext;
+			const result = await bash.execute("t", { command: probe }, undefined, undefined, ctx);
+			assert.ok(JSON.stringify(result).includes("FAIL-CLOSED-OK"), "protected bash must use the sentinel, not personal credentials");
+		}
 	} finally {
-		for (const [k, v] of keep) if (v !== undefined) process.env[k] = v;
+		for (const [k, v] of keep) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+		rmSync(dir, { recursive: true, force: true });
 	}
 	console.log("ok fail-closed registration");
 }
@@ -216,8 +255,6 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 // --- setup (pure parts; browser/API flow is manual) ------------------------
 {
-	const { callbackCode, selectInstallation, normalizePem, defaultAppName, manifestInput, manifestFormHtml } = _setupInternals;
-
 	assert.match(defaultAppName(), /^pi-agent-[a-z0-9-]+-[0-9a-f]{4}$/, "suggested App name is hostname-based + unique suffix");
 	assert.ok(defaultAppName().length <= 34, "suggested App name fits GitHub's 34-char limit");
 
@@ -226,10 +263,6 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	assert.equal(callbackCode("/callback"), null);
 	assert.equal(callbackCode("/favicon.ico"), null);
 	assert.equal(callbackCode(undefined), null);
-
-	assert.deepEqual(selectInstallation([]), { kind: "none" });
-	assert.deepEqual(selectInstallation([{ id: 1, login: "a" }]), { kind: "single", id: 1 });
-	assert.equal(selectInstallation([{ id: 1, login: "a" }, { id: 2, login: "b" }]).kind, "choose");
 
 	assert.ok(normalizePem("A\\nB").includes("\n"), "escaped newlines restored");
 	assert.ok(normalizePem("A\nB").includes("\n"), "real newlines kept");
@@ -254,8 +287,6 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 // --- setup server + API parts (localhost only, no external network) --------
 {
-	const { createAuth, createSetupServer, exchangeCode, listInstallations } = _setupInternals;
-
 	// form serving + code capture
 	const setup = createSetupServer();
 	await new Promise<void>((res, rej) => {
@@ -271,6 +302,13 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	assert.equal((await fetch(`${base}/callback?code=abc123`)).status, 200);
 	assert.equal(await codePromise, "abc123");
 	setup.server.close();
+
+	// A failed callback must reject only the promise the caller awaits.
+	const failed = createSetupServer();
+	const failure = failed.waitForCode();
+	failed.server.emit("error", new Error("synthetic setup failure"));
+	await assert.rejects(failure, /synthetic setup failure/);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	console.log("ok setup server");
 
 	// manifest conversion + installation listing against a mock API
@@ -297,7 +335,6 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 // --- setup wizard (cancel path, fake UI — no network) -----------------------
 {
-	const { runSetupWizard } = _setupInternals;
 	const log: string[] = [];
 	const ui = {
 		select: async () => undefined, // cancel at the very first dialog
@@ -312,9 +349,6 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 
 // --- committer attribution -------------------------------------------------
 {
-	const { resolveCommitterIdentity, loadStoredCredentials, saveStoredCredentials, createAuth } = _setupInternals;
-	const { agentEnv } = _internals;
-
 	// env injection (agent shells only)
 	const base = { PATH: "/bin" };
 	const committer = { name: "my-app[bot]", email: "99+my-app[bot]@users.noreply.github.com" };
@@ -322,7 +356,8 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 	assert.equal(withComm.GIT_COMMITTER_NAME, "my-app[bot]", "committer name injected");
 	assert.equal(withComm.GIT_COMMITTER_EMAIL, "99+my-app[bot]@users.noreply.github.com", "committer email injected");
 	const gpgsignIdx = 2 + githubSshHosts().length * 2; // after credential entries and host insteadOf rules
-	assert.equal(withComm[`GIT_CONFIG_VALUE_${gpgsignIdx}`], "false", "commit.gpgsign disabled for agent commits");	assert.equal(withComm.GIT_CONFIG_COUNT, String(3 + githubSshHosts().length * 2), "one extra config entry with committer");
+	assert.equal(withComm[`GIT_CONFIG_VALUE_${gpgsignIdx}`], "false", "commit.gpgsign disabled for agent commits");
+	assert.equal(withComm.GIT_CONFIG_COUNT, String(3 + githubSshHosts().length * 2), "one extra config entry with committer");
 	const withoutComm = agentEnv(base, "tok", []);
 	assert.ok(!("GIT_COMMITTER_NAME" in withoutComm), "no committer -> no injection");
 	assert.ok(!("GIT_COMMITTER_EMAIL" in withoutComm), "no committer -> no email injection");
@@ -376,7 +411,10 @@ const { readConfig, createAuth, fetchInstallationToken, githubSshHosts, githubCo
 		saveStoredCredentials({ clientId: "Iv1x", installationId: "42", privateKey: pem });
 		assert.ok(!loadStoredCredentials().config?.committerName, "omitted committer fields stay absent");
 	} finally {
-		for (const [k, v] of keep) if (v !== undefined) process.env[k] = v;
+		for (const [k, v] of keep) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
 		rmSync(dir, { recursive: true, force: true });
 	}
 	console.log("ok committer attribution");

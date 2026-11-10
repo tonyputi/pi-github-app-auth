@@ -10,7 +10,7 @@
  * The synchronous spawnHook adjusts the spawned process environment:
  *
  *   - strips PI_GITHUB_APP_PRIVATE_KEY / _CLIENT_ID / _INSTALLATION_ID
- *     (the App private key is consumed here, never visible to any subprocess)
+ *     (the App private key is removed from protected bash child environments)
  *   - injects GH_TOKEN=<installation token>  (in-memory only, never on disk)
  *   - injects ephemeral git config via GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n
  *     (equivalent to `git -c`, nothing persisted anywhere):
@@ -101,7 +101,6 @@ const GITHUB_CREDENTIAL_HELPER = `!f() { sleep 1; if [ "$1" = get ] && [ -n "$GH
 // Non-GitHub hosts pass through to real ssh untouched.
 const GIT_SSH_GUARD = `pi_github_app_guard() { for a in "$@"; do case "$a" in *github.com|*github.com:*) printf 'pi-github-app: GitHub SSH access is blocked in agent shells; use HTTPS (GitHub App). Arg: %s\\n' "$a" >&2; exit 111 ;; esac; done; command ssh "$@"; }; pi_github_app_guard`;
 
-
 /**
  * JWT signing + installation-token exchange, owned by @octokit/auth-app
  * (GitHub-maintained; installation tokens cached in memory by the library).
@@ -138,7 +137,7 @@ let cached: CachedToken | null = null;
 let refreshTimer: NodeJS.Timeout | null = null;
 let failureReported = false;
 let appAuth: AppAuth | null = null;
-/** Bot committer identity for attribution, resolved at load (see runAtLoad). */
+/** Bot committer identity, resolved when the extension loads. */
 let committer: { name: string; email: string } | null = null;
 
 function scheduleRefresh(config: GitHubAppConfig, atMs: number): void {
@@ -215,26 +214,17 @@ function githubSshHosts(sshDir = join(homedir(), ".ssh")): string[] {
 	return [...hosts];
 }
 
-interface GlobalRewrite {
-	base: string;
-	prefix: string;
-}
-
 /** Suffixes used to build strictly-longer countersink prefixes (URL-safe chars). */
 const COUNTERSINK_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-~";
 
-/** Read the user's global `url.<base>.insteadOf = <prefix>` rules (read-only). */
-function globalInsteadOfRules(): GlobalRewrite[] {
+/** Read the prefixes of the user's global URL rewrite rules (read-only). */
+function globalInsteadOfPrefixes(): string[] {
 	try {
 		const out = execFileSync("git", ["config", "--global", "--get-regexp", "url\\..*\\.insteadof"], { encoding: "utf8" });
 		return out
 			.split("\n")
-			.filter(Boolean)
-			.map((line) => {
-				const m = line.match(/^url\.(.*)\.insteadof (.+)$/i);
-				return m ? { base: m[1], prefix: m[2] } : null;
-			})
-			.filter((r): r is GlobalRewrite => r !== null);
+			.map((line) => line.match(/^url\..*\.insteadof (.+)$/i)?.[1])
+			.filter((prefix): prefix is string => prefix !== undefined);
 	} catch (err) {
 		const status = (err as { status?: number }).status;
 		if (status !== 1) console.error(`pi-github-app: could not read global insteadOf rules (git exit ${status ?? "?"}) — the SSH guard still blocks GitHub SSH`);
@@ -253,7 +243,7 @@ function globalInsteadOfRules(): GlobalRewrite[] {
  */
 function githubCountersinks(): Array<[string, string]> {
 	const sinks: Array<[string, string]> = [];
-	for (const { prefix } of globalInsteadOfRules()) {
+	for (const prefix of globalInsteadOfPrefixes()) {
 		const ghHttps = prefix.match(/^https:\/\/github\.com\/([^/]+\/$)/);
 		const ghSsh = prefix.match(/^git@github\.com:([^/]+\/$)/);
 		if (!ghHttps && !ghSsh) continue; // unrelated rule — the SSH guard covers it
@@ -307,13 +297,8 @@ function agentEnv(
 	}
 	next.GIT_CONFIG_COUNT = String(base + entries.length);
 
-	if (token) {
-		next.GH_TOKEN = token;
-	} else {
-		// No token: give gh a sentinel so it fails loudly instead of silently
-		// using the personal keyring account; git fails via the helper's sentinel check.
-		next.GH_TOKEN = GH_SENTINEL;
-	}
+	// The sentinel prevents gh from falling back to the personal keyring account.
+	next.GH_TOKEN = token || GH_SENTINEL;
 	// direnv setups often expose a personal GITHUB_TOKEN in pi's process; gh would
 	// prefer GH_TOKEN, but other tools read GITHUB_TOKEN — keep agent shells
 	// GitHub-App-only.
@@ -436,4 +421,4 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 }
 
 // Exposed for self-check scripts only; pi itself only uses the default export.
-export const _internals = { agentEnv, githubSshHosts, githubCountersinks, readConfig, createAuth, fetchInstallationToken, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };
+export const _internals = { agentEnv, githubSshHosts, githubCountersinks, fetchInstallationToken, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL };
