@@ -1,3 +1,10 @@
+## [0.5.1](https://github.com/tonyputi/pi-github-app-auth/compare/v0.5.0...v0.5.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* simplify setup helpers and handle invalid configuration ([#36](https://github.com/tonyputi/pi-github-app-auth/issues/36)) ([a63b86d](https://github.com/tonyputi/pi-github-app-auth/commit/a63b86d248c942359a05570375a34bd2642cd7e3))
+
 # [0.5.0](https://github.com/tonyputi/pi-github-app-auth/compare/v0.4.1...v0.5.0) (2026-11-10)
 
 
