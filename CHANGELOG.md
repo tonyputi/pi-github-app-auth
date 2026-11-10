@@ -1,3 +1,10 @@
+# [0.5.0](https://github.com/tonyputi/pi-github-app-auth/compare/v0.4.1...v0.5.0) (2026-11-10)
+
+
+### Features
+
+* **setup:** remove the deprecated setup CLI stub ([#24](https://github.com/tonyputi/pi-github-app-auth/issues/24)) ([7eec9ca](https://github.com/tonyputi/pi-github-app-auth/commit/7eec9cae8a14bb016840115b2b9a50a12e6b8a05))
+
 ## [0.4.1](https://github.com/tonyputi/pi-github-app-auth/compare/v0.4.0...v0.4.1) (2026-11-10)
 
 
