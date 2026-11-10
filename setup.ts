@@ -2,7 +2,7 @@
  * pi-github-app-auth setup — GitHub App manifest flow, run as a wizard inside
  * Pi (`/github-app-auth setup`) instead of a separate npm CLI.
  *
- * Flow (same GitHub flow the old CLI used, delivered in-process):
+ * Flow:
  *   1. A local HTTP server on 127.0.0.1 (ephemeral port, no secrets) serves an
  *      auto-submitting manifest form that pre-fills everything, name included.
  *   2. The browser opens the form; you press Create.
@@ -96,7 +96,7 @@ function looksLikePem(key: string): boolean {
 	return key.includes("BEGIN") && key.includes("PRIVATE KEY");
 }
 
-/** Read the credential file. Missing file -> inert; anything else broken -> error. */
+/** Read the credential file. Missing file -> no config; invalid contents -> error. */
 export function loadStoredCredentials(): ConfigResolution {
 	let text: string;
 	try {
@@ -110,6 +110,9 @@ export function loadStoredCredentials(): ConfigResolution {
 		parsed = JSON.parse(text);
 	} catch {
 		return { error: `${credentialsPath()} is not valid JSON` };
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return { error: `${credentialsPath()} must contain a JSON object` };
 	}
 	const o = parsed as Record<string, unknown>;
 	const clientId = typeof o.clientId === "string" ? o.clientId.trim() : "";
@@ -178,15 +181,6 @@ export function callbackCode(target: string | undefined): string | null {
 	if (q === -1) return null;
 	const code = new URLSearchParams(target.slice(q + 1)).get("code")?.trim();
 	return code ? code : null;
-}
-
-/** Decide how to resolve the installation id from what the API lists. */
-export function selectInstallation(
-	installations: InstallationRef[],
-): { kind: "none" } | { kind: "single"; id: number } | { kind: "choose"; options: InstallationRef[] } {
-	if (installations.length === 0) return { kind: "none" };
-	if (installations.length === 1) return { kind: "single", id: installations[0].id };
-	return { kind: "choose", options: installations };
 }
 
 /** Suggested App name: hostname-based plus a random suffix for global uniqueness.
@@ -304,7 +298,7 @@ export function createSetupServer(): {
 				CALLBACK_TIMEOUT_MS,
 			);
 			timer.unref();
-			void code.finally(() => clearTimeout(timer));
+			void code.then(() => clearTimeout(timer), () => clearTimeout(timer));
 			return code;
 		},
 	};
@@ -476,24 +470,3 @@ export async function runSetupWizard(ui: WizardUI): Promise<WizardResult | null>
 	});
 	return { slug: conversion.slug, installationId, path };
 }
-
-// Exposed for self-check scripts only; pi itself uses the wizard via index.ts.
-export const _setupInternals = {
-	callbackCode,
-	selectInstallation,
-	normalizePem,
-	defaultAppName,
-	manifestInput,
-	manifestFormHtml,
-	createAuth,
-	createSetupServer,
-	exchangeCode,
-	listInstallations,
-	loadStoredCredentials,
-	saveStoredCredentials,
-	resolveCommitterIdentity,
-	credentialsPath,
-	readConfig,
-	runSetupWizard,
-	openBrowser,
-};

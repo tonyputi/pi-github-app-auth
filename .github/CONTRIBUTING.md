@@ -6,10 +6,10 @@ Thanks for taking a look! This is a small, security-focused Pi extension — the
 
 ```bash
 npm install   # installs the Pi peer dep (devDependency, tests only)
-npm test      # plain-assert self-checks, no framework, no network
+npm test      # plain-assert self-checks, no framework or external network
 ```
 
-No build step: the extension ships as a single `index.ts` (type-stripped by Node 22.18+). Keep it that way — one file is the auditability feature.
+No build step: Pi loads the TypeScript sources directly. Keep runtime code in `index.ts` (agent authentication) and `setup.ts` (configuration and setup wizard), without extra layers.
 
 ## Pull requests
 
@@ -17,7 +17,7 @@ No build step: the extension ships as a single `index.ts` (type-stripped by Node
 - Pure logic (`ssh config` parsing, `insteadOf` countersinks, env assembly) gets tests in `test.ts`.
 - `npm test` must pass; update the README if user-visible behavior changes.
 - Runtime dependencies stay at one: `@octokit/auth-app` (GitHub-maintained, owns JWTs + token cache). Everything else is Node built-ins and the Pi extension API — no new runtime deps without a security review.
-- Use [Conventional Commits](https://www.conventionalcommits.org/) in PR titles (the release workflow squash-merges them): `fix:` patches, `feat:` bumps minor, `feat!:`/`BREAKING CHANGE:` bumps major. `docs:`, `chore:`, `test:` and friends release nothing.
+- Use [Conventional Commits](https://www.conventionalcommits.org/) in PR titles (used as commit messages when squash-merging): `fix:` patches, `feat:` bumps minor, `feat!:`/`BREAKING CHANGE:` bumps major. `docs:`, `chore:`, `test:` and friends release nothing.
 
 ## Security issues
 
