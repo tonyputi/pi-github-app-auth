@@ -1,6 +1,6 @@
 {
 	"name": "pi-github-app-auth",
-	"version": "0.3.0",
+	"version": "0.4.1",
 	"description": "Authenticate Pi agent bash commands to GitHub as a GitHub App installation, without touching your personal git/gh credentials",
 	"license": "MIT",
 	"type": "module",
@@ -25,6 +25,7 @@
 	"files": [
 		"index.ts",
 		"setup.ts",
+		"test-live.ts",
 		"README.md",
 		"LICENSE"
 	],
@@ -40,7 +41,8 @@
 		"typescript": "^7.0.2"
 	},
 	"scripts": {
-		"test": "node test.ts"
+		"test": "node test.ts",
+		"test:live": "node test-live.ts"
 	},
 	"release": {
 		"branches": [

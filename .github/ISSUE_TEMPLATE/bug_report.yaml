@@ -1,0 +1,50 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem.
+
+        **Never paste secrets**: no PEM private keys, no tokens, no credential-file contents.
+        `/github-app-auth status` is designed to be safe to share — its output contains no secrets.
+        For security-sensitive reports, use [private vulnerability reporting](https://github.com/tonyputi/pi-github-app-auth/security/advisories/new) instead of this form.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the problem, including any error message you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Pi version, extension version, OS, and the config source — all shown by `/github-app-auth status` inside Pi.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Output of `/github-app-auth status`, failing git/gh commands, terminal errors — no secrets.
+      render: shell
+    validations:
+      required: false

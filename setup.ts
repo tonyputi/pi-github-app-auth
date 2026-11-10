@@ -40,6 +40,10 @@ export interface GitHubAppConfig {
 	installationId: string;
 	/** PEM private key of the GitHub App (real or escaped newlines). */
 	privateKey: string;
+	/** Bot committer identity for attribution ("authored by the user, committed by the App").
+	 *  Optional; discovered automatically via the GitHub API when missing. */
+	committerName?: string;
+	committerEmail?: string;
 }
 
 export type AppAuth = ReturnType<typeof createAppAuth>;
@@ -115,7 +119,10 @@ export function loadStoredCredentials(): ConfigResolution {
 		return { error: `${credentialsPath()} is missing clientId / installationId / privateKey` };
 	}
 	if (!looksLikePem(privateKey)) return { error: `privateKey in ${credentialsPath()} does not look like a PEM private key` };
-	return { config: { clientId, installationId, privateKey } };
+	const committerName = typeof o.committerName === "string" && o.committerName.trim() ? o.committerName.trim() : undefined;
+	const committerEmail = typeof o.committerEmail === "string" && o.committerEmail.trim() ? o.committerEmail.trim() : undefined;
+	const committer = committerName && committerEmail ? { committerName, committerEmail } : {};
+	return { config: { clientId, installationId, privateKey, ...committer } };
 }
 
 /** Write the credential file (0600) and return its path. */
@@ -326,6 +333,37 @@ export async function exchangeCode(code: string, apiBase: string = GITHUB_API): 
 	return { slug: data.slug, clientId: data.client_id, pem: normalizePem(data.pem) };
 }
 
+/**
+ * Committer identity for attribution ("authored by the user, committed by the
+ * App bot"). Resolves the App slug via GET /app (JWT) and the bot user id
+ * via the public GET /users/<slug>[bot] endpoint, then builds GitHub's bot
+ * noreply address so commits link to the bot avatar. Returns null on any
+ * failure — attribution simply stays off and commits behave as before.
+ */
+export async function resolveCommitterIdentity(
+	auth: AppAuth,
+	apiBase: string = GITHUB_API,
+): Promise<{ name: string; email: string } | null> {
+	try {
+		const { token } = (await auth({ type: "app" })) as { token: string };
+		const appRes = await fetch(`${apiBase}/app`, {
+			headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "pi-github-app-auth-setup" },
+		});
+		if (!appRes.ok) return null;
+		const slug = ((await appRes.json()) as { slug?: unknown }).slug;
+		if (typeof slug !== "string" || !slug) return null;
+		const userRes = await fetch(`${apiBase}/users/${encodeURIComponent(`${slug}[bot]`)}`, {
+			headers: { Accept: "application/vnd.github+json", "User-Agent": "pi-github-app-auth-setup" },
+		});
+		if (!userRes.ok) return null;
+		const id = ((await userRes.json()) as { id?: unknown }).id;
+		if (typeof id !== "number") return null;
+		return { name: `${slug}[bot]`, email: `${id}+${slug}[bot]@users.noreply.github.com` };
+	} catch {
+		return null;
+	}
+}
+
 export async function listInstallations(auth: AppAuth, apiBase: string = GITHUB_API): Promise<InstallationRef[]> {
 	const { token } = (await auth({ type: "app" })) as { token: string };
 	const res = await fetch(`${apiBase}/app/installations`, {
@@ -426,9 +464,16 @@ export async function runSetupWizard(ui: WizardUI): Promise<WizardResult | null>
 	ui.notify(`github-app-auth: App "${conversion.slug}" created — now install it (opening the page; waiting up to 3 min).`, "info");
 	const installUrl = `https://github.com/apps/${conversion.slug}/installations/new`;
 	openBrowser(installUrl, () => ui.notify(`github-app-auth: no browser available — open ${installUrl} to install the App.`, "warning"));
-	const installationId = await pickInstallation(ui, createAuth(conversion.clientId, conversion.pem));
+	const auth = createAuth(conversion.clientId, conversion.pem);
+	const installationId = await pickInstallation(ui, auth);
 
-	const path = saveStoredCredentials({ clientId: conversion.clientId, installationId, privateKey: conversion.pem });
+	const committer = await resolveCommitterIdentity(auth);
+	const path = saveStoredCredentials({
+		clientId: conversion.clientId,
+		installationId,
+		privateKey: conversion.pem,
+		...(committer ? { committerName: committer.name, committerEmail: committer.email } : {}),
+	});
 	return { slug: conversion.slug, installationId, path };
 }
 
@@ -446,6 +491,7 @@ export const _setupInternals = {
 	listInstallations,
 	loadStoredCredentials,
 	saveStoredCredentials,
+	resolveCommitterIdentity,
 	credentialsPath,
 	readConfig,
 	runSetupWizard,
