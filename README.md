@@ -118,7 +118,7 @@ sequenceDiagram
     Auth->>GitHub: Exchange JWT for installation token
     GitHub-->>Auth: Token + expires_at
     Auth-->>Extension: Cache token in memory
-    Note over Extension,GitHub: Refresh 5 min before expiry; retry failures every 30 s
+    Note over Extension,GitHub: Refresh 5 min before expiry<br/>Retry failures every 30 s
 
     Agent->>Extension: Run bash command
     Extension->>Shell: Inject GH_TOKEN + temporary Git settings<br/>Remove App secrets and personal GITHUB_TOKEN
