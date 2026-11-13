@@ -19,6 +19,15 @@ No build step: Pi loads the TypeScript sources directly. Keep runtime code in `i
 - Runtime dependencies stay at one: `@octokit/auth-app` (GitHub-maintained, owns JWTs + token cache). Everything else is Node built-ins and the Pi extension API — no new runtime deps without a security review.
 - Use [Conventional Commits](https://www.conventionalcommits.org/) in PR titles (used as commit messages when squash-merging): `fix:` patches, `feat:` bumps minor, `feat!:`/`BREAKING CHANGE:` bumps major. `docs:`, `chore:`, `test:` and friends release nothing.
 
+## Releases
+
+The Release workflow runs semantic-release after a merge to `main`. It publishes
+npm packages, versioned Git tags and GitHub Releases without pushing release commits
+to the protected branch. The npm plugin sets the published package version in the CI
+workspace; the source `package.json` version can therefore lag behind npm.
+Use [GitHub Releases](https://github.com/tonyputi/pi-github-app-auth/releases) for current
+release notes. The existing `CHANGELOG.md` is retained as historical release notes.
+
 ## Security issues
 
 This extension handles a GitHub App private key. **Do not open a public issue for security problems** — use [private vulnerability reporting](https://github.com/tonyputi/pi-github-app-auth/security/advisories/new) instead.

@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write # tags, releases, CHANGELOG push-back
+  contents: write # tags and GitHub Releases
   issues: write # release comments on PRs
   pull-requests: write # release comments on PRs
 
