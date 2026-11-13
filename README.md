@@ -102,7 +102,33 @@ authored by alice, committed by pi-agent-x1y2[bot]
 
 ## How it works
 
-The extension overrides Pi's built-in `bash` tool and adjusts the child environment of commands executed through that tool:
+The extension overrides Pi's built-in `bash` tool. Token refresh happens in the background; each command receives the current token through its child environment, without a new token request:
+
+```mermaid
+sequenceDiagram
+    participant Agent as Pi agent
+    participant Extension as Extension
+    participant Auth as @octokit/auth-app
+    participant GitHub as GitHub
+    participant Shell as Agent bash child
+
+    Note over Extension,Auth: On load, with valid configuration
+    Extension->>Auth: Request installation token
+    Auth->>Auth: Sign App JWT in memory
+    Auth->>GitHub: Exchange JWT for installation token
+    GitHub-->>Auth: Token + expires_at
+    Auth-->>Extension: Cache token in memory
+    Note over Extension,GitHub: Refresh 5 min before expiry; retry failures every 30 s
+
+    Agent->>Extension: Run bash command
+    Extension->>Shell: Inject GH_TOKEN + temporary Git settings<br/>Remove App secrets and personal GITHUB_TOKEN
+    Note over Shell: No personal credential helpers or GitHub SSH fallback
+    Shell->>GitHub: git / gh request over HTTPS with installation token
+    GitHub-->>Shell: Result, subject to App permissions
+    Shell-->>Agent: Command output
+```
+
+This shows the successful authentication path; see [Token lifecycle](#token-lifecycle) for the unavailable-token path. The environment changes are:
 
 - `GH_TOKEN=<installation token>` — `gh` authenticates as the App installation.
 - Ephemeral git config (process environment only, equivalent to `git -c`, nothing persisted):
@@ -131,13 +157,26 @@ SSH host aliases that resolve to `github.com` in `~/.ssh/config` (including `Inc
 
 ## Token lifecycle
 
-1. A GitHub App JWT is signed **in memory** by `@octokit/auth-app` (`iss` = client id).
-2. It is exchanged for an installation token, cached **in memory only** by the library — never written to disk, logs, or error messages.
-3. A background timer refreshes it **5 minutes before** GitHub's `expires_at` (retrying every 30 s on failure).
+`@octokit/auth-app` signs the App JWT **in memory** (`iss` = client id) and exchanges it for an installation token. Tokens are cached **in memory only**, never written to disk, logs, or error messages. A background timer refreshes the token **5 minutes before** GitHub's `expires_at`, retrying every **30 seconds** on failure; a previously cached token remains usable until its final minute.
 
-If configuration is missing, invalid, or incomplete, the `bash` protection still registers and supplies an invalid sentinel token instead of personal credentials. Run setup or fix the configuration, then reload Pi.
+Each agent `bash` command follows this decision flow:
 
-With valid configuration, token-fetch failures are retried every 30 seconds. A cached token is usable until its final minute; when no usable token is available, the protected shell supplies the same sentinel. GitHub authentication fails instead of silently consulting your personal credentials.
+```mermaid
+flowchart TD
+    Command[Agent bash command] --> Config{Valid configuration?}
+    Config -->|Yes| Token{Cached token with<br/>more than 1 min left?}
+    Config -->|No| Sentinel[Set GH_TOKEN to invalid sentinel]
+    Token -->|Yes| App[Set GH_TOKEN to installation token]
+    Token -->|No| Sentinel
+    App --> Guard[Apply protected child environment:<br/>strip App secrets and personal GITHUB_TOKEN;<br/>reset helpers; rewrite GitHub SSH to HTTPS;<br/>block remaining GitHub SSH and prompts]
+    Sentinel --> Guard
+    Guard --> Run[Run command]
+    Run --> Result[GitHub authentication uses the App token,<br/>or fails without personal fallback]
+```
+
+The sentinel (`pi-github-app-unavailable`) blocks GitHub authentication, not local shell work. Protection stays active even with missing, invalid, or incomplete configuration: run setup or fix the configuration, then reload Pi. With valid configuration, background retries can restore token availability without a reload.
+
+Implementation: [`index.ts`](index.ts) handles token refresh and child environments; [`setup.ts`](setup.ts) handles configuration and the setup wizard.
 
 ## Configuration
 
