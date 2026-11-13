@@ -4,7 +4,7 @@
  */
 import assert from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -28,6 +28,18 @@ import {
 } from "./setup.ts";
 
 const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, parseSubcommand, GITHUB_CREDENTIAL_HELPER, GH_SENTINEL } = _internals;
+
+// --- release configuration ------------------------------------------------
+{
+	const { release } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+	assert.deepEqual(release.plugins, [
+		"@semantic-release/commit-analyzer",
+		"@semantic-release/release-notes-generator",
+		"@semantic-release/npm",
+		"@semantic-release/github",
+	], "release publishes npm and GitHub assets without protected-branch write-back");
+	console.log("ok release configuration");
+}
 
 // --- readConfig -----------------------------------------------------------
 {
