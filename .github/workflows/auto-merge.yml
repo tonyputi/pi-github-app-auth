@@ -1,0 +1,18 @@
+name: Dependabot Auto-Merge
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  auto-merge:
+    uses: tonyputi/.github/.github/workflows/auto-merge.yml@abba5c12b2a8496342c2ccd755e87d038b882623
+    with:
+      github_app_id: ${{ vars.GH_APP_ID }}
+    secrets:
+      github_app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
