@@ -270,11 +270,16 @@ const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, pa
 	assert.match(defaultAppName(), /^pi-agent-[a-z0-9-]+-[0-9a-f]{4}$/, "suggested App name is hostname-based + unique suffix");
 	assert.ok(defaultAppName().length <= 34, "suggested App name fits GitHub's 34-char limit");
 
-	assert.equal(callbackCode("/callback?code=abc123"), "abc123");
-	assert.equal(callbackCode("/callback?code=abc123&state=x"), "abc123");
-	assert.equal(callbackCode("/callback"), null);
-	assert.equal(callbackCode("/favicon.ico"), null);
-	assert.equal(callbackCode(undefined), null);
+	assert.equal(callbackCode("/callback?code=abc123&state=x", "x"), "abc123");
+	for (const target of [
+		undefined, "/callback", "/favicon.ico", "/callback?code=abc123",
+		"/callback?code=abc123&state=y", "/callback?code=abc123&state=longer",
+		"/callback?state=x", "/callback?code=&state=x", "/callback?code=%20&state=x",
+		"/callback-extra?code=abc123&state=x", "/callback/?code=abc123&state=x",
+		"/callback?code=abc123&state=x&state=x", "/callback?code=abc123&code=def&state=x",
+		"/callback?code=%ZZ&state=x", "/callback?code=%00&state=x",
+		"/callback?code=abc#fragment&state=x", "/callback?code=%C3%28&state=x",
+	]) assert.equal(callbackCode(target, "x"), null, "invalid callback must not yield a code");
 
 	assert.ok(normalizePem("A\\nB").includes("\n"), "escaped newlines restored");
 	assert.ok(normalizePem("A\nB").includes("\n"), "real newlines kept");
@@ -290,7 +295,12 @@ const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, pa
 	assert.equal((manifest as { redirect_url: string }).redirect_url, "http://127.0.0.1:8471/callback");
 	assert.ok(!("hook_attributes" in manifest), "webhook config omitted when no webhook URL is configured");
 
-	const html = manifestFormHtml(action, manifest);
+	const html = manifestFormHtml(action, manifest, "state&value");
+	assert.ok(html.includes(`${action}?state=state%26value`), "state uses the documented action query");
+	assert.ok(!html.includes('name="state"'), "state is not an undocumented POST field");
+	assert.ok(!("state" in manifest), "state is not part of the manifest");
+	assert.ok(manifestFormHtml(manifestInput(8471, { org: "acme" }).action, manifest, "x")
+		.includes('action="https://github.com/organizations/acme/settings/apps/new?state=x"'));
 	assert.ok(html.includes('method="post"') && html.includes('.submit()'), "auto-submitting form posts the manifest");
 	assert.ok(html.includes(action), "form targets the creation endpoint");
 	assert.ok(!html.includes("</script><script"), "no injection point in embedded JSON");
@@ -299,8 +309,14 @@ const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, pa
 
 // --- setup server + API parts (localhost only, no external network) --------
 {
-	// form serving + code capture
+	// Protected form access, invalid callbacks, then exactly one successful capture.
 	const setup = createSetupServer();
+	const other = createSetupServer();
+	assert.match(setup.state, /^[0-9a-f]{64}$/);
+	assert.match(setup.setupPath, /^\/setup\/[0-9a-f]{64}$/);
+	assert.notEqual(setup.state, other.state);
+	assert.notEqual(setup.setupPath, other.setupPath);
+	assert.ok(!setup.setupPath.includes(setup.state), "setup capability and callback state are distinct");
 	await new Promise<void>((res, rej) => {
 		setup.server.once("error", rej);
 		setup.server.listen(0, "127.0.0.1", () => res());
@@ -308,12 +324,38 @@ const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, pa
 	const port = (setup.server.address() as { port: number }).port;
 	const base = `http://127.0.0.1:${port}`;
 	setup.setFormHtml("<form>hello</form>");
-	assert.equal(await (await fetch(`${base}/`)).text(), "<form>hello</form>");
-	assert.equal((await fetch(`${base}/nope`)).status, 404);
-	const codePromise = setup.waitForCode();
-	assert.equal((await fetch(`${base}/callback?code=abc123`)).status, 200);
-	assert.equal(await codePromise, "abc123");
-	setup.server.close();
+	try {
+		for (const path of ["/", "/?ignored=1", "/nope", "/setup/guessed", other.setupPath, `${setup.setupPath}/`, `${setup.setupPath}?extra=1`]) {
+			const response = await fetch(`${base}${path}`);
+			assert.equal(response.status, 404);
+			assert.ok(!(await response.text()).includes(setup.state));
+		}
+		const form = await fetch(`${base}${setup.setupPath}`);
+		assert.equal(await form.text(), "<form>hello</form>");
+		assert.equal(form.headers.get("cache-control"), "no-store");
+		assert.equal(form.headers.get("referrer-policy"), "no-referrer");
+		assert.equal((await fetch(`${base}${setup.setupPath}`, { method: "POST" })).status, 405);
+		const codePromise = setup.waitForCode();
+		let captures = 0;
+		void codePromise.then(() => captures++);
+		const valid = `/callback?code=abc123&state=${setup.state}`;
+		for (const path of [
+			"/callback?code=abc123", `/callback?code=abc123&state=${other.state}`,
+			`/callback?state=${setup.state}`, `${valid}&state=${setup.state}`,
+			`${valid}&code=other`, valid.replace("abc123", "%ZZ"),
+			valid.replace("/callback?", "/callback-extra?"),
+		]) assert.ok((await fetch(`${base}${path}`)).status >= 400);
+		assert.equal((await fetch(`${base}${valid}`, { method: "POST" })).status, 405);
+		assert.equal(captures, 0, "invalid requests leave the legitimate callback pending");
+		assert.equal((await fetch(`${base}${valid}`)).status, 200);
+		assert.equal(await codePromise, "abc123");
+		assert.ok((await fetch(`${base}${valid}`)).status >= 400, "replay is rejected");
+		assert.ok((await fetch(`${base}${valid.replace("abc123", "second")}`)).status >= 400);
+		assert.equal((await fetch(`${base}${setup.setupPath}`)).status, 404, "completed form is unavailable");
+		assert.equal(captures, 1);
+	} finally {
+		setup.server.close();
+	}
 
 	// A failed callback must reject only the promise the caller awaits.
 	const failed = createSetupServer();

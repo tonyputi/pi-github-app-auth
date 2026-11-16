@@ -3,8 +3,8 @@
  * Pi (`/github-app-auth setup`) instead of a separate npm CLI.
  *
  * Flow:
- *   1. A local HTTP server on 127.0.0.1 (ephemeral port, no secrets) serves an
- *      auto-submitting manifest form that pre-fills everything, name included.
+ *   1. A local HTTP server on 127.0.0.1 (ephemeral port, private setup URL)
+ *      serves an auto-submitting manifest form with a per-run callback state.
  *   2. The browser opens the form; you press Create.
  *   3. GitHub redirects back with a single-use manifest `code`, exchanged via
  *      POST /app-manifests/{code}/conversions for slug, client_id and PEM key.
@@ -21,6 +21,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createAppAuth } from "@octokit/auth-app";
@@ -174,13 +175,22 @@ export function createAuth(clientId: string, privateKey: string): AppAuth {
 	return createAppAuth({ appId: clientId, privateKey });
 }
 
-/** Parse `code` out of a callback request target (null when absent). */
-export function callbackCode(target: string | undefined): string | null {
-	if (!target) return null;
-	const q = target.indexOf("?");
-	if (q === -1) return null;
-	const code = new URLSearchParams(target.slice(q + 1)).get("code")?.trim();
-	return code ? code : null;
+/** Return a code only for an exact callback with one matching state and one code. */
+export function callbackCode(target: string | undefined, expectedState: string): string | null {
+	const q = target?.indexOf("?") ?? -1;
+	if (!target || q === -1 || target.slice(0, q) !== "/callback" || target.includes("#") || !expectedState) return null;
+	try {
+		decodeURIComponent(target); // URLSearchParams alone tolerates malformed percent escapes.
+	} catch {
+		return null;
+	}
+	const params = new URLSearchParams(target.slice(q + 1));
+	if (params.getAll("state").length !== 1 || params.getAll("code").length !== 1) return null;
+	const state = Buffer.from(params.get("state")!);
+	const expected = Buffer.from(expectedState);
+	if (state.length !== expected.length || !timingSafeEqual(state, expected)) return null;
+	const code = params.get("code")!;
+	return code && !/[\s\x00-\x1f\x7f]/u.test(code) ? code : null;
 }
 
 /** Suggested App name: hostname-based plus a random suffix for global uniqueness.
@@ -220,10 +230,12 @@ export function manifestInput(port: number, opts: { org?: string; name?: string 
 	return { action, manifest };
 }
 
-/** Auto-submitting form page. No secrets. */
-export function manifestFormHtml(action: string, manifest: Record<string, unknown>): string {
+/** Auto-submitting form with state in the action query, as documented by GitHub. */
+export function manifestFormHtml(action: string, manifest: Record<string, unknown>, state: string): string {
 	const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-	return `<!doctype html><html><body><form id="f" method="post" action="${esc(action)}"><input type="hidden" name="manifest" value="${esc(JSON.stringify(manifest))}"></form><script>document.getElementById("f").submit()</script></body></html>`;
+	const target = new URL(action);
+	target.searchParams.set("state", state);
+	return `<!doctype html><html><body><form id="f" method="post" action="${esc(target.href)}"><input type="hidden" name="manifest" value="${esc(JSON.stringify(manifest))}"></form><script>document.getElementById("f").submit()</script></body></html>`;
 }
 
 /** Best-effort browser open; `onFail` runs when no opener is available. */
@@ -239,20 +251,16 @@ export function openBrowser(target: string, onFail?: () => void): void {
 	});
 }
 
-/**
- * Local setup server: serves the auto-submitting manifest form at `/` and
- * captures the single-use manifest `code` at `/callback`.
- *
- * No `state` check on the callback: the only abuse is tricking your own
- * browser into linking someone else's fresh App to your environment — the
- * attacker gains nothing (it is their App) and the wrong slug is visible
- * immediately. Same trade-off as Probot's setup flow.
- */
+/** Local setup server: a private form URL and an independently correlated, single-use callback. */
 export function createSetupServer(): {
 	server: Server;
+	setupPath: string;
+	state: string;
 	setFormHtml: (html: string) => void;
 	waitForCode: () => Promise<string>;
 } {
+	const setupPath = `/setup/${randomBytes(32).toString("hex")}`;
+	const state = randomBytes(32).toString("hex");
 	let form = "<h1>Loading GitHub App form…</h1>";
 	let settled = false;
 	let resolveCode!: (code: string) => void;
@@ -270,13 +278,19 @@ export function createSetupServer(): {
 		}
 	};
 	const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+		res.setHeader("Cache-Control", "no-store");
+		res.setHeader("Referrer-Policy", "no-referrer");
+		if (req.method !== "GET") {
+			res.writeHead(405, { Allow: "GET", "content-type": "text/plain" }).end("method not allowed");
+			return;
+		}
 		const target = req.url ?? "/";
-		if (target === "/" || target.startsWith("/?")) {
+		if (target === setupPath && !settled) {
 			res.writeHead(200, { "content-type": "text/html" }).end(form);
 			return;
 		}
-		if (target.startsWith("/callback")) {
-			const found = callbackCode(target);
+		if (target.split("?", 1)[0] === "/callback") {
+			const found = callbackCode(target, state);
 			if (found && !settled) {
 				settled = true;
 				res.writeHead(200, { "content-type": "text/html" }).end("<h1>App created — back to Pi.</h1>");
@@ -289,6 +303,8 @@ export function createSetupServer(): {
 	server.on("error", fail);
 	return {
 		server,
+		setupPath,
+		state,
 		setFormHtml: (html: string): void => {
 			form = html;
 		},
@@ -446,8 +462,8 @@ export async function runSetupWizard(ui: WizardUI): Promise<WizardResult | null>
 	try {
 		const port = await listenLocal(setup.server);
 		const { action, manifest } = manifestInput(port, { org, name });
-		setup.setFormHtml(manifestFormHtml(action, manifest));
-		const local = `http://127.0.0.1:${port}/`;
+		setup.setFormHtml(manifestFormHtml(action, manifest, setup.state));
+		const local = `http://127.0.0.1:${port}${setup.setupPath}`;
 		ui.notify(`github-app-auth: opening the pre-filled App form ("${name}") — press Create. If no browser opens: ${local}`, "info");
 		openBrowser(local, () => ui.notify(`github-app-auth: no browser available — open ${local} to continue.`, "warning"));
 		conversion = await exchangeCode(await setup.waitForCode());

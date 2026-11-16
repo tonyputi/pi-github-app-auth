@@ -40,7 +40,7 @@ The setup wizard walks you through five steps:
 
 Use `/github-app-auth status` any time to check configuration, token availability, and commit attribution without displaying secrets. Until setup succeeds, GitHub authentication in the protected agent shell is blocked rather than falling back to your personal account.
 
-The callback server binds only to `127.0.0.1`. Wizard-generated private keys are written to the credential file, not exported into the environment.
+The setup server binds only to `127.0.0.1` on a temporary port and waits up to five minutes for GitHub's callback. The wizard opens a random, per-run setup link; keep this link private. The form is not available at `/` and is served without caching or sending its URL as a referrer. It posts the manifest to GitHub with a separate random `state` in the form action URL, following [GitHub's documented manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest). Only a callback with matching state is accepted, once; invalid callbacks do not stop the legitimate flow. Wizard-generated private keys are written to the credential file, not exported into the environment.
 
 ## Why a separate GitHub App?
 
