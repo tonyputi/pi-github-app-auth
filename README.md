@@ -40,7 +40,35 @@ The setup wizard walks you through five steps:
 
 Use `/github-app-auth status` any time to check configuration, token availability, and commit attribution without displaying secrets. Until setup succeeds, GitHub authentication in the protected agent shell is blocked rather than falling back to your personal account.
 
-The setup server binds only to `127.0.0.1` on a temporary port and waits up to five minutes for GitHub's callback. The wizard opens a random, per-run setup link; keep this link private. The form is not available at `/` and is served without caching or sending its URL as a referrer. It posts the manifest to GitHub with a separate random `state` in the form action URL, following [GitHub's documented manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest). Only a callback with matching state is accepted, once; invalid callbacks do not stop the legitimate flow. Wizard-generated private keys are written to the credential file, not exported into the environment.
+By default, the setup server binds only to `127.0.0.1` on a temporary port and waits up to five minutes for GitHub's callback. The wizard opens a random, per-run setup link; keep this link private. The form is not available at `/` and is served without caching or sending its URL as a referrer. It posts the manifest to GitHub with a separate random `state` in the form action URL, following [GitHub's documented manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest). Only a callback with matching state is accepted, once; invalid callbacks do not stop the legitimate flow. Wizard-generated private keys are written to the credential file, not exported into the environment.
+
+### Setup inside a container
+
+The browser usually runs on the host, not inside the container. Configure a fixed listener port and publish it to **host loopback**. For [Apple `container`](https://github.com/apple/container/blob/main/docs/command-reference.md), using an image that already contains Pi and this extension:
+
+```sh
+container run -it \
+  -p 127.0.0.1:8471:8471 \
+  -e PI_GITHUB_APP_SETUP_HOST=0.0.0.0 \
+  -e PI_GITHUB_APP_SETUP_PORT=8471 \
+  <your-pi-image> pi
+```
+
+Run `/github-app-auth setup` in the container's interactive Pi session. Open the **full protected setup link** printed by the wizard in your host browser, even if browser launch inside the container appears to succeed. Do not replace its random path with `/`. The browser and GitHub callback use `http://127.0.0.1:8471`; `0.0.0.0` is only the container's listen address. The wizard still needs an interactive terminal, not Pi's non-interactive mode.
+
+Set these variables **before starting Pi**, inside the container:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PI_GITHUB_APP_SETUP_HOST` | `127.0.0.1` | Listener IP address or `localhost`. `0.0.0.0` explicitly enables listening on all IPv4 interfaces. |
+| `PI_GITHUB_APP_SETUP_PORT` | `0` | Listener port, `0` for a temporary port or `1`–`65535` for a fixed port. |
+| `PI_GITHUB_APP_SETUP_PUBLIC_URL` | Derived from the listener's actual port, with a loopback browser host | Optional browser-facing origin, shared by the setup link and GitHub callback. |
+
+For a different published host port, use `-p 127.0.0.1:9471:8471` and also set `-e PI_GITHUB_APP_SETUP_PUBLIC_URL=http://127.0.0.1:9471`. The container still listens on port `8471`. IPv6 loopback and `localhost` binds use the corresponding browser host; wildcard binds never appear in browser URLs. A specific non-loopback listener address requires an explicit `PUBLIC_URL`.
+
+`PUBLIC_URL` must be an absolute HTTP(S) origin with no credentials, path prefix, query, fragment, wildcard host, or port `0`. HTTP is allowed only for loopback (`127.0.0.0/8`, `localhost`, or `::1`); remote browser hosts require HTTPS. The listener itself remains HTTP: an HTTPS URL requires separately configured TLS termination and forwarding, which the wizard does not provide. Do not expose the HTTP listener directly on an untrusted network. Prefer host-loopback port forwarding and keep the setup link private.
+
+Only wizard networking changes. GitHub App permissions, credential storage and normal agent authentication remain unchanged. Keep the agent directory in persistent storage before removing or recreating the container: it contains the App private key. Container runtimes and macOS versions can differ; check your installed runtime's port-publishing support.
 
 ## Why a separate GitHub App?
 
@@ -140,7 +168,7 @@ This shows the successful authentication path; see [Token lifecycle](#token-life
   - Countersink `insteadOf` rules (generated at load from your global git config) so personal URL rewrites cannot drag GitHub URLs back onto personal SSH aliases.
   - `commit.gpgsign` is disabled so agent commits are never signed with a personal key.
 - When the bot identity is resolved, `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` pin the **committer** to the App bot while the author stays your own identity — see [Commit attribution](#commit-attribution).
-- `PI_GITHUB_APP_*` variables are **stripped** from the child environment: an agent command like `env` never sees the private key. Only the short-lived installation token is visible to the processes that need it.
+- App credential variables (`PI_GITHUB_APP_PRIVATE_KEY`, `PI_GITHUB_APP_CLIENT_ID`, and `PI_GITHUB_APP_INSTALLATION_ID`) are **stripped** from the child environment: an agent command like `env` never sees the private key. Only the short-lived installation token is visible to the processes that need it.
 - Personal `GITHUB_TOKEN` inherited from your shell is removed in agent shells so nothing silently falls back to it.
 
 ## HTTPS and SSH remotes

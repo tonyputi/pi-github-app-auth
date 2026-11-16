@@ -410,7 +410,7 @@ export default function piGithubAppAuth(pi: ExtensionAPI): void {
 					config ? `config source: ${source === "env" ? "environment override (PI_GITHUB_APP_*)" : credentialsPath()}` : "",
 					committer ? `commit attribution: agent commits authored by your git identity, committed as ${committer.name}` : "",
 					token ? `installation token: cached in memory, expires ${expiry}` : "installation token: not available right now",
-					"agent bash env: GH_TOKEN + ephemeral git config (credential helper, SSH->HTTPS insteadOf + SSH guard); PI_GITHUB_APP_* removed",
+					"agent bash env: GH_TOKEN + ephemeral git config (credential helper, SSH->HTTPS insteadOf + SSH guard); App credential variables removed",
 				]
 					.filter(Boolean)
 					.join("\n"),

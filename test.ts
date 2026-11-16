@@ -17,11 +17,13 @@ import {
 	defaultAppName,
 	exchangeCode,
 	listInstallations,
+	listenSetup,
 	loadStoredCredentials,
 	manifestFormHtml,
 	manifestInput,
 	normalizePem,
 	readConfig,
+	readSetupConfig,
 	resolveCommitterIdentity,
 	runSetupWizard,
 	saveStoredCredentials,
@@ -265,6 +267,42 @@ const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, pa
 	console.log("ok parseSubcommand");
 }
 
+// --- setup networking configuration --------------------------------------
+{
+	assert.deepEqual(readSetupConfig({}), { host: "127.0.0.1", port: 0, publicUrl: undefined });
+	assert.deepEqual(readSetupConfig({ PI_GITHUB_APP_SETUP_HOST: " 0.0.0.0 ", PI_GITHUB_APP_SETUP_PORT: " 8471 " }),
+		{ host: "0.0.0.0", port: 8471, publicUrl: undefined });
+	assert.equal(readSetupConfig({ PI_GITHUB_APP_SETUP_PORT: "65535" }).port, 65535);
+	for (const host of ["localhost", "127.0.0.2", "::1", "::"]) {
+		assert.equal(readSetupConfig({ PI_GITHUB_APP_SETUP_HOST: host }).host, host);
+	}
+	for (const url of ["http://127.0.0.1:9471/", "http://localhost:9471", "http://[::1]:9471", "https://setup.example.test"]) {
+		assert.equal(readSetupConfig({ PI_GITHUB_APP_SETUP_PUBLIC_URL: url }).publicUrl, new URL(url).origin);
+	}
+	assert.equal(readSetupConfig({ PI_GITHUB_APP_SETUP_HOST: "192.0.2.1", PI_GITHUB_APP_SETUP_PUBLIC_URL: "https://setup.example.test" }).host,
+		"192.0.2.1");
+	for (const port of ["-1", "65536", "1.5", "1e3", "0x10", "NaN", "Infinity", "abc"]) {
+		assert.throws(() => readSetupConfig({ PI_GITHUB_APP_SETUP_PORT: port }), /PI_GITHUB_APP_SETUP_PORT/);
+	}
+	for (const host of ["http://127.0.0.1", "[::1]", "bad host", "example.test"]) {
+		assert.throws(() => readSetupConfig({ PI_GITHUB_APP_SETUP_HOST: host }), /PI_GITHUB_APP_SETUP_HOST/);
+	}
+	assert.throws(() => readSetupConfig({ PI_GITHUB_APP_SETUP_HOST: "192.0.2.1" }), /PI_GITHUB_APP_SETUP_PUBLIC_URL/);
+	for (const url of [
+		"not a URL", "/relative", "ftp://127.0.0.1", "http://192.0.2.1:8471", "http://example.test",
+		"http://0.0.0.0:8471", "https://[::]:8471", "http://127.0.0.1:0", "http://127.0.0.1:65536",
+		"http://127.0.0.1/path", "http://127.0.0.1?query=1", "http://127.0.0.1#fragment",
+		"https://user:private-test-value@example.test",
+	]) {
+		assert.throws(() => readSetupConfig({ PI_GITHUB_APP_SETUP_PUBLIC_URL: url }), (err: Error) => {
+			assert.match(err.message, /PI_GITHUB_APP_SETUP_PUBLIC_URL/);
+			assert.ok(!err.message.includes("private-test-value"), "invalid settings do not leak credentials");
+			return true;
+		});
+	}
+	console.log("ok setup networking configuration");
+}
+
 // --- setup (pure parts; browser/API flow is manual) ------------------------
 {
 	assert.match(defaultAppName(), /^pi-agent-[a-z0-9-]+-[0-9a-f]{4}$/, "suggested App name is hostname-based + unique suffix");
@@ -294,6 +332,8 @@ const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, pa
 	assert.equal(perms.metadata, "read");
 	assert.equal((manifest as { redirect_url: string }).redirect_url, "http://127.0.0.1:8471/callback");
 	assert.ok(!("hook_attributes" in manifest), "webhook config omitted when no webhook URL is configured");
+	assert.equal(manifestInput(8471, { baseUrl: "http://127.0.0.1:9471" }).manifest.redirect_url,
+		"http://127.0.0.1:9471/callback", "callback uses the forwarded browser port, not the listen port");
 
 	const html = manifestFormHtml(action, manifest, "state&value");
 	assert.ok(html.includes(`${action}?state=state%26value`), "state uses the documented action query");
@@ -387,6 +427,68 @@ const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, pa
 	console.log("ok setup api");
 }
 
+// --- setup listener (temporary local sockets, no container runtime) --------
+{
+	const setup = createSetupServer();
+	const config = readSetupConfig({});
+	try {
+		const base = await listenSetup(setup.server, config);
+		const address = setup.server.address() as { address: string; port: number };
+		assert.equal(address.address, "127.0.0.1", "default listener stays on loopback");
+		assert.ok(address.port > 0);
+		assert.equal(base, `http://127.0.0.1:${address.port}`);
+		assert.equal(manifestInput(address.port, { baseUrl: base }).manifest.redirect_url, `${base}/callback`);
+		const conflicting = createSetupServer();
+		try {
+			await assert.rejects(listenSetup(conflicting.server, { ...config, port: address.port }), { code: "EADDRINUSE" });
+		} finally {
+			conflicting.server.close();
+		}
+	} finally {
+		await new Promise<void>((resolve) => setup.server.close(() => resolve()));
+	}
+
+	// Bind a fixed container-side port and forward a different host-loopback port.
+	const backend = createSetupServer();
+	const { createServer, connect } = await import("node:net");
+	const forwarded = createServer((client) => {
+		const upstream = connect((backend.server.address() as { port: number }).port, "127.0.0.1");
+		client.pipe(upstream).pipe(client);
+		client.on("error", () => upstream.destroy());
+		upstream.on("error", () => client.destroy());
+		client.on("close", () => upstream.destroy());
+	});
+	try {
+		// Reuse the released ephemeral port as a fixed port, without hard-coding a machine-specific port.
+		await new Promise<void>((resolve) => forwarded.listen(0, "127.0.0.1", resolve));
+		const defaultBase = await listenSetup(backend.server, readSetupConfig({ PI_GITHUB_APP_SETUP_HOST: "0.0.0.0" }));
+		assert.equal(new URL(defaultBase).hostname, "127.0.0.1", "wildcard bind is never a browser address");
+		const port = Number(new URL(defaultBase).port);
+		await new Promise<void>((resolve) => backend.server.close(() => resolve()));
+		const publicUrl = `http://127.0.0.1:${(forwarded.address() as { port: number }).port}`;
+		const base = await listenSetup(backend.server, readSetupConfig({
+			PI_GITHUB_APP_SETUP_HOST: "0.0.0.0", PI_GITHUB_APP_SETUP_PORT: String(port), PI_GITHUB_APP_SETUP_PUBLIC_URL: publicUrl,
+		}));
+		assert.equal((backend.server.address() as { address: string }).address, "0.0.0.0");
+		assert.equal((backend.server.address() as { port: number }).port, port);
+		assert.equal(base, publicUrl);
+		const { action, manifest } = manifestInput(port, { baseUrl: base });
+		assert.equal(manifest.redirect_url, `${publicUrl}/callback`);
+		backend.setFormHtml(manifestFormHtml(action, manifest, backend.state));
+		assert.equal((await fetch(`${base}/`)).status, 404);
+		assert.equal((await fetch(`${base}${backend.setupPath}`)).status, 200);
+		const code = backend.waitForCode();
+		assert.equal((await fetch(`${base}/callback?code=forwarded&state=${backend.state}`)).status, 200);
+		assert.equal(await code, "forwarded");
+		assert.equal((await fetch(`${base}/callback?code=replayed&state=${backend.state}`)).status, 404);
+	} finally {
+		backend.server.closeAllConnections();
+		backend.server.close();
+		forwarded.close();
+	}
+	console.log("ok setup listener and port forwarding");
+}
+
 // --- setup wizard (cancel path, fake UI — no network) -----------------------
 {
 	const log: string[] = [];
@@ -398,7 +500,20 @@ const { fetchInstallationToken, githubSshHosts, githubCountersinks, agentEnv, pa
 	};
 	assert.equal(await runSetupWizard(ui), null, "cancel at first select -> null, nothing touched");
 	assert.ok(log.some((m) => m.includes("cancelled")), "cancellation is announced");
-	console.log("ok wizard cancel");
+	const keep = ["PI_GITHUB_APP_SETUP_HOST", "PI_GITHUB_APP_SETUP_PORT", "PI_GITHUB_APP_SETUP_PUBLIC_URL"]
+		.map((key) => [key, process.env[key]] as const);
+	for (const [key] of keep) delete process.env[key];
+	try {
+		process.env.PI_GITHUB_APP_SETUP_PORT = "invalid";
+		await assert.rejects(runSetupWizard({ ...ui, select: async () => "Personal account", input: async () => "test" }),
+			/PI_GITHUB_APP_SETUP_PORT/, "invalid settings fail before starting the listener or opening a browser");
+	} finally {
+		for (const [key, value] of keep) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+	console.log("ok wizard cancel and invalid setup configuration");
 }
 
 // --- committer attribution -------------------------------------------------
