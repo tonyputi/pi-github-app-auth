@@ -3,7 +3,7 @@
  * Pi (`/github-app-auth setup`) instead of a separate npm CLI.
  *
  * Flow:
- *   1. A local HTTP server on 127.0.0.1 (ephemeral port, private setup URL)
+ *   1. An HTTP server (loopback/ephemeral by default, private setup URL)
  *      serves an auto-submitting manifest form with a per-run callback state.
  *   2. The browser opens the form; you press Create.
  *   3. GitHub redirects back with a single-use manifest `code`, exchanged via
@@ -27,6 +27,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createAppAuth } from "@octokit/auth-app";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { isIP } from "node:net";
 
 const GITHUB_API = "https://api.github.com";
 const REPO_URL = "https://github.com/tonyputi/pi-github-app-auth";
@@ -207,14 +208,54 @@ export function defaultAppName(): string {
 	return `pi-agent-${host}-${suffix}`;
 }
 
+function isLoopback(host: string): boolean {
+	return host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127."));
+}
+
+/** Validate setup networking before starting a listener; never echo raw environment values. */
+export function readSetupConfig(env: NodeJS.ProcessEnv = process.env): { host: string; port: number; publicUrl?: string } {
+	const host = env.PI_GITHUB_APP_SETUP_HOST?.trim() || "127.0.0.1";
+	if (host !== "localhost" && !isIP(host)) {
+		throw new Error("PI_GITHUB_APP_SETUP_HOST must be an IP address or localhost");
+	}
+	const rawPort = env.PI_GITHUB_APP_SETUP_PORT?.trim() || "0";
+	const port = Number(rawPort);
+	if (!/^\d+$/.test(rawPort) || !Number.isInteger(port) || port > 65535) {
+		throw new Error("PI_GITHUB_APP_SETUP_PORT must be an integer from 0 (temporary port) to 65535");
+	}
+	const rawUrl = env.PI_GITHUB_APP_SETUP_PUBLIC_URL?.trim();
+	let publicUrl: string | undefined;
+	if (rawUrl) {
+		let url: URL;
+		try {
+			url = new URL(rawUrl);
+		} catch {
+			throw new Error("PI_GITHUB_APP_SETUP_PUBLIC_URL must be an absolute HTTP(S) base URL");
+		}
+		if (!["http:", "https:"].includes(url.protocol) || url.username || url.password ||
+			url.pathname !== "/" || rawUrl.includes("?") || rawUrl.includes("#") || url.port === "0" ||
+			url.hostname === "0.0.0.0" || url.hostname === "[::]") {
+			throw new Error("PI_GITHUB_APP_SETUP_PUBLIC_URL must be an HTTP(S) origin without credentials, path, query, fragment, wildcard host, or port 0");
+		}
+		if (url.protocol === "http:" && !isLoopback(url.hostname)) {
+			throw new Error("PI_GITHUB_APP_SETUP_PUBLIC_URL requires HTTPS for non-loopback hosts; use host-loopback port forwarding for HTTP");
+		}
+		publicUrl = url.origin;
+	}
+	if (!publicUrl && !isLoopback(host) && host !== "0.0.0.0" && host !== "::") {
+		throw new Error("Set PI_GITHUB_APP_SETUP_PUBLIC_URL when binding a specific non-loopback address");
+	}
+	return { host, port, publicUrl };
+}
+
 /** Manifest creation endpoint + pre-filled payload for the agent's needs. */
-export function manifestInput(port: number, opts: { org?: string; name?: string } = {}): ManifestInput {
+export function manifestInput(port: number, opts: { org?: string; name?: string; baseUrl?: string } = {}): ManifestInput {
 	const action = opts.org
 		? `https://github.com/organizations/${encodeURIComponent(opts.org)}/settings/apps/new`
 		: "https://github.com/settings/apps/new";
 	const manifest: Record<string, unknown> = {
 		url: REPO_URL,
-		redirect_url: `http://127.0.0.1:${port}/callback`,
+		redirect_url: `${opts.baseUrl ?? `http://127.0.0.1:${port}`}/callback`,
 		public: false,
 		description: "Authenticates Pi agent bash commands to GitHub as an App installation.",
 		default_permissions: {
@@ -320,12 +361,15 @@ export function createSetupServer(): {
 	};
 }
 
-function listenLocal(server: Server): Promise<number> {
+/** Return the browser-facing origin, independently of the listener's network namespace. */
+export function listenSetup(server: Server, config: ReturnType<typeof readSetupConfig>): Promise<string> {
 	return new Promise((resolve, reject) => {
 		server.once("error", reject);
-		server.listen(0, "127.0.0.1", () => {
+		server.listen(config.port, config.host, () => {
 			server.off("error", reject);
-			resolve((server.address() as { port: number }).port);
+			const port = (server.address() as { port: number }).port;
+			const host = isLoopback(config.host) ? config.host : "127.0.0.1";
+			resolve(config.publicUrl ?? `http://${isIP(host) === 6 ? `[${host}]` : host}:${port}`);
 		});
 	});
 }
@@ -457,13 +501,15 @@ export async function runSetupWizard(ui: WizardUI): Promise<WizardResult | null>
 	const suggested = defaultAppName();
 	const name = (await ui.input("github-app-auth — App name (must be unique on GitHub)", suggested))?.trim() || suggested;
 
+	const config = readSetupConfig();
 	const setup = createSetupServer();
 	let conversion: Conversion;
 	try {
-		const port = await listenLocal(setup.server);
-		const { action, manifest } = manifestInput(port, { org, name });
+		const baseUrl = await listenSetup(setup.server, config);
+		const port = (setup.server.address() as { port: number }).port;
+		const { action, manifest } = manifestInput(port, { org, name, baseUrl });
 		setup.setFormHtml(manifestFormHtml(action, manifest, setup.state));
-		const local = `http://127.0.0.1:${port}${setup.setupPath}`;
+		const local = `${baseUrl}${setup.setupPath}`;
 		ui.notify(`github-app-auth: opening the pre-filled App form ("${name}") — press Create. If no browser opens: ${local}`, "info");
 		openBrowser(local, () => ui.notify(`github-app-auth: no browser available — open ${local} to continue.`, "warning"));
 		conversion = await exchangeCode(await setup.waitForCode());
