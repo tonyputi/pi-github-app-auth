@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   auto-merge:
-    uses: tonyputi/.github/.github/workflows/auto-merge.yml@abba5c12b2a8496342c2ccd755e87d038b882623
+    uses: tonyputi/.github/.github/workflows/auto-merge.yml@a7aa478ba4fc6b682b8c09b77676cfc80ebb43cf
     with:
       github_app_id: ${{ vars.GH_APP_ID }}
     secrets:
