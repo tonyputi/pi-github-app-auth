@@ -35,7 +35,7 @@
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "^1.2.0",
 		"@types/node": "^26.6.5",
-		"semantic-release": "^25.0.9",
+		"semantic-release": "^26.0.1",
 		"typescript": "^7.0.2"
 	},
 	"scripts": {
